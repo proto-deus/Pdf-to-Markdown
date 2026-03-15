@@ -1,0 +1,19 @@
+{
+  "llm_api": {
+    "base_url": "http://localhost:1234/v1",
+    "api_key": "sk-lm-GEiRPOI8:5lDAROZsASUqz2TMLtSd",
+    "model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated",
+    "vision_model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated"
+  },
+  "conversion": {
+    "max_context_tokens": 8192,
+    "chunk_overlap_tokens": 200,
+    "save_images": true,
+    "filter_images_by_llm": true
+  },
+  "input_output": {
+    "input_path": "./docs",
+    "output_path": "output",
+    "recursive": true
+  }
+}
