@@ -1,7 +1,7 @@
 {
   "llm_api": {
     "base_url": "http://localhost:1234/v1",
-    "api_key": "sk-lm-GEiRPOI8:5lDAROZsASUqz2TMLtSd",
+    "api_key": "your-api-key",
     "model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated",
     "vision_model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated"
   },
