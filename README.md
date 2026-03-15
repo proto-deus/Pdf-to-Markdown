@@ -43,7 +43,7 @@ pip install openai tiktoken pymupdf tqdm
 
 ---
 
-## Configuration (`config.json`)
+## Configuration
 
 Create a `config.json` file in the project root. Below is the **complete default configuration**:
 
