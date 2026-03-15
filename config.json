@@ -1,19 +1,21 @@
 {
-  "llm_api": {
-    "base_url": "http://localhost:1234/v1",
-    "api_key": "your-api-key",
-    "model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated",
-    "vision_model": "mradermacher/huihui-qwen3-vl-8b-instruct-abliterated"
-  },
-  "conversion": {
-    "max_context_tokens": 8192,
-    "chunk_overlap_tokens": 200,
-    "save_images": true,
-    "filter_images_by_llm": true
-  },
-  "input_output": {
-    "input_path": "./docs",
-    "output_path": "output",
-    "recursive": true
-  }
+    "llm_api": {
+        "base_url": "http://localhost:11434/v1",
+        "api_key": "you-api-key",
+        "model": "llama-3.2"
+    },
+    "conversion": {
+        "max_context_tokens": 4096,
+        "chunk_overlap_tokens": 200,
+        "save_images": true,
+        "filter_images_by_llm": true,
+        "image_prefix": "img",
+        "temperature": 0.1,
+        "max_tokens_response": 4096
+    },
+    "input_output": {
+        "input_path": ".",
+        "output_path": "output",
+        "recursive": true
+    }
 }
