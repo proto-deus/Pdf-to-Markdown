@@ -712,14 +712,14 @@ class PDFProcessor:
         """Extract, filter, and save relevant images from a page."""
         image_refs = []
         img_list = page.get_images(full=True)
-
+        
         # Get page dimensions for background detection
         page_rect = page.rect
         page_area = page_rect.width * page_rect.height
-
+        
         # Check if this page might be a scanned page (minimal text)
         is_likely_scanned = len(text.strip()) < 100
-
+        
         for i, img in enumerate(img_list):
             try:
                 xref = img[0]
@@ -727,69 +727,69 @@ class PDFProcessor:
                 if not rects:
                     continue
                 rect = rects[0]
-
+                
                 # Calculate coverage of this image relative to the page
                 img_area = rect.width * rect.height
                 coverage_ratio = img_area / page_area if page_area > 0 else 0
-
+                
                 # Skip background scan images with multiple detection methods
                 should_skip = False
                 skip_reason = ""
-
+                
                 # Method 1: Check if image covers most of the page
                 coverage_threshold = self.img_page_coverage_threshold
                 if is_likely_scanned:
-                    coverage_threshold = min(coverage_threshold, 0.80)
-
+                    coverage_threshold = min(coverage_threshold, 0.85)  # Use at most 85% for scanned pages
+                
                 if coverage_ratio > coverage_threshold:
                     should_skip = True
                     skip_reason = f"covers {coverage_ratio:.1%} of page (threshold: {coverage_threshold:.0%})"
-
+                
                 # Method 2: Check if image is positioned as a full-page background
                 elif (abs(rect.x0) < 10 and abs(rect.y0) < 10 and
-                      abs(rect.x1 - page_rect.x1) < 10 and
+                      abs(rect.x1 - page_rect.x1) < 10 and 
                       abs(rect.y1 - page_rect.y1) < 10):
                     should_skip = True
                     skip_reason = "full-page background positioning"
-
-                # Method 3: Check if image is the only image and covers >80% of page
-                elif len(img_list) == 1 and coverage_ratio > 0.80:
+                
+                # Method 3: Check if image is the only image and covers most of the page
+                elif len(img_list) == 1 and coverage_ratio > coverage_threshold:
                     should_skip = True
-                    skip_reason = "single image covering >50% of page"
-
+                    skip_reason = f"single image covering {coverage_ratio:.1%} of page (threshold: {coverage_threshold:.0%})"
+                
                 # Method 4: For scanned documents, skip any image covering >40%
                 elif is_likely_scanned and coverage_ratio > 0.4:
                     should_skip = True
                     skip_reason = f"large image ({coverage_ratio:.1%}) on text-sparse page"
-
+                
                 if should_skip:
                     self.logger.debug(
                         f"Skipping image {i} on page {page_num+1}: "
                         f"{skip_reason} (likely background scan)"
                     )
                     continue
-
+                
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
-
+    
                 # Use higher render scale for small images so the
                 # LLM (and pixel-density check) has more to work with
                 area = rect.width * rect.height
                 if area < 2500:  # under ~50×50
-                    scale = 8.0
-                elif area < 10000:  # under ~100×100
-                    scale = 6.0
-                else:
                     scale = 4.0
-
+                elif area < 10000:  # under ~100×100
+                    scale = 3.0
+                else:
+                    scale = 2.0
+    
                 mat = fitz.Matrix(scale, scale)
                 pix = page.get_pixmap(matrix=mat, clip=rect)
                 if page.rotation != 0:
                     pix = pix.rotate(page.rotation)
-
+    
                 if self.is_image_likely_irrelevant(rect, pix):
                     continue
-
+    
                 img_bytes = pix.tobytes("jpeg")
                 if self.is_image_relevant(img_bytes, text):
                     prefix = self.conv_settings.get('image_prefix', 'img')
