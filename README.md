@@ -2,7 +2,7 @@
 
 A Python script that converts PDF documents to Markdown format using an OpenAI compatible api endpoint. It features intelligent image extraction, OCR post-processing, and configurable settings.
 
-As a side note, I would suggest to everyone to use [datalab/marker](https://github.com/datalab-to/marker) first. It is far superior to this project. I made this script because for some documents, Marker can produce long repeated sections of text makeing the MD output unusable. I use this script to convert these files for now.
+As a side note, I would suggest to everyone to use [datalab-to/marker](https://github.com/datalab-to/marker) first. It is far superior to this project. I made this script because for some documents, Marker can produce long repeated sections of text makeing the MD output unusable. I use this script to convert these files for now.
 
 ---
 
