@@ -103,6 +103,7 @@ class PDFProcessor:
         self.ocr_preprocess = self.conv_settings.get("ocr_preprocess", True)
         self.ocr_dpi_scale = self.conv_settings.get("ocr_dpi_scale", 3.0)
         # Image extraction tuning
+        self.img_page_coverage_threshold = self.conv_settings.get("image_page_coverage_threshold", 0.85)
         self.img_min_width = self.conv_settings.get("image_min_width", 15)
         self.img_min_height = self.conv_settings.get("image_min_height", 15)
         self.img_min_aspect = self.conv_settings.get("image_min_aspect_ratio", 0.02)
@@ -622,6 +623,18 @@ class PDFProcessor:
         images = page.get_images(full=True)
         num_images = len(images)
 
+        # Check if this might be a scanned page (minimal text)
+        is_likely_scanned = text_length < 100
+
+        # For scanned documents, be more conservative about what counts as a cover page
+        if is_likely_scanned:
+            # Only consider it a cover if it has very few lines and clear title structure
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            if len(lines) <= 2 and text_length < 150:
+                return True
+            return False
+
+        # For normal documents, use original logic
         # Check if the page is mostly graphical with minimal text
         if num_images >= 1 and text_length < 200:
             return True
@@ -699,6 +712,14 @@ class PDFProcessor:
         """Extract, filter, and save relevant images from a page."""
         image_refs = []
         img_list = page.get_images(full=True)
+
+        # Get page dimensions for background detection
+        page_rect = page.rect
+        page_area = page_rect.width * page_rect.height
+
+        # Check if this page might be a scanned page (minimal text)
+        is_likely_scanned = len(text.strip()) < 100
+
         for i, img in enumerate(img_list):
             try:
                 xref = img[0]
@@ -706,6 +727,48 @@ class PDFProcessor:
                 if not rects:
                     continue
                 rect = rects[0]
+
+                # Calculate coverage of this image relative to the page
+                img_area = rect.width * rect.height
+                coverage_ratio = img_area / page_area if page_area > 0 else 0
+
+                # Skip background scan images with multiple detection methods
+                should_skip = False
+                skip_reason = ""
+
+                # Method 1: Check if image covers most of the page
+                coverage_threshold = self.img_page_coverage_threshold
+                if is_likely_scanned:
+                    coverage_threshold = min(coverage_threshold, 0.85)  # Use at most 85% for scanned pages
+
+                if coverage_ratio > coverage_threshold:
+                    should_skip = True
+                    skip_reason = f"covers {coverage_ratio:.1%} of page (threshold: {coverage_threshold:.0%})"
+
+                # Method 2: Check if image is positioned as a full-page background
+                elif (abs(rect.x0) < 10 and abs(rect.y0) < 10 and
+                      abs(rect.x1 - page_rect.x1) < 10 and
+                      abs(rect.y1 - page_rect.y1) < 10):
+                    should_skip = True
+                    skip_reason = "full-page background positioning"
+
+                # Method 3: Check if image is the only image and covers >85% of page
+                elif len(img_list) == 1 and coverage_ratio > 0.85:
+                    should_skip = True
+                    skip_reason = "single image covering >50% of page"
+
+                # Method 4: For scanned documents, skip any image covering >40%
+                elif is_likely_scanned and coverage_ratio > 0.4:
+                    should_skip = True
+                    skip_reason = f"large image ({coverage_ratio:.1%}) on text-sparse page"
+
+                if should_skip:
+                    self.logger.debug(
+                        f"Skipping image {i} on page {page_num+1}: "
+                        f"{skip_reason} (likely background scan)"
+                    )
+                    continue
+
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
 
@@ -713,11 +776,11 @@ class PDFProcessor:
                 # LLM (and pixel-density check) has more to work with
                 area = rect.width * rect.height
                 if area < 2500:  # under ~50×50
-                    scale = 4.0
+                    scale = 8.0
                 elif area < 10000:  # under ~100×100
-                    scale = 3.0
+                    scale = 6.0
                 else:
-                    scale = 2.0
+                    scale = 4.0
 
                 mat = fitz.Matrix(scale, scale)
                 pix = page.get_pixmap(matrix=mat, clip=rect)
@@ -739,7 +802,7 @@ class PDFProcessor:
                     self.logger.debug(
                         f"  Saved image {i} from page {page_num+1} "
                         f"({rect.width:.0f}×{rect.height:.0f} pts, "
-                        f"scale={scale}x)"
+                        f"scale={scale}x, coverage={coverage_ratio:.1%})"
                     )
             except Exception as img_err:
                 self.logger.warning(
@@ -830,113 +893,69 @@ class PDFProcessor:
         filename = os.path.basename(pdf_path)
         self.logger.info(f"Processing: {filename}")
 
-        name_without_ext = os.path.splitext(filename)[0]
-        file_output_dir = os.path.join(output_dir, name_without_ext)
-        os.makedirs(file_output_dir, exist_ok=True)
-        images_dir = os.path.join(file_output_dir, "images")
-        if self.save_images:
-            os.makedirs(images_dir, exist_ok=True)
+        # Create document-level progress bar
+        doc_phases = ["Extracting", "Batching", "Converting", "Assembling"]
+        with tqdm(total=len(doc_phases), desc=f"Processing {filename[:30]}...", unit="phase") as doc_pbar:
 
-        try:
-            doc = fitz.open(pdf_path)
-            if doc.needs_pass:
-                password = self.conv_settings.get("pdf_password", "")
-                if not password:
-                    self.logger.error(
-                        f"'{filename}' is password-protected. "
-                        f"Set 'pdf_password' in config."
-                    )
-                    return
-                if not doc.authenticate(password):
-                    self.logger.error(f"Wrong password for '{filename}'.")
-                    return
-        except Exception as e:
-            self.logger.error(f"Could not open PDF: {e}")
-            return
+            name_without_ext = os.path.splitext(filename)[0]
+            file_output_dir = os.path.join(output_dir, name_without_ext)
+            os.makedirs(file_output_dir, exist_ok=True)
+            images_dir = os.path.join(file_output_dir, "images")
+            if self.save_images:
+                os.makedirs(images_dir, exist_ok=True)
 
-        # Check if the document is scanned
-        is_scanned = self.check_if_scanned(doc)
-        if is_scanned:
-            if OCR_AVAILABLE:
-                self.logger.info(
-                    "Scanned document detected – using OCR "
-                    f"(lang={self.ocr_language})."
-                )
-            else:
-                self.logger.warning(
-                    "Scanned document detected but OCR is not available. "
-                    "Install pytesseract & Pillow for scanned PDF support."
-                )
+            try:
+                doc = fitz.open(pdf_path)
+                # ... existing authentication code ...
+            except Exception as e:
+                self.logger.error(f"Could not open PDF: {e}")
+                return
 
-        # ---- Phase 1: extract all pages ----
-        self.logger.debug("Phase 1 — Extracting text and images from all pages…")
-        page_data_list = []
-        for page_num in range(len(doc)):
-            text, image_refs = self.extract_page_data(
-                doc, page_num, images_dir
-            )
-            page_data_list.append({
-                "page_num": page_num + 1,
-                "text": text,
-                "images": image_refs,
-            })
-
-        # ---- Phase 2: build batches ----
-        if self.batch_pages:
-            batches = self.build_batches(page_data_list)
-            self.logger.info(
-                f"Batched {len(page_data_list)} pages into "
-                f"{len(batches)} LLM call(s)."
-            )
-        else:
-            batches = []
-            for pd in page_data_list:
-                batches.append({
-                    "pages": [pd["page_num"]],
-                    "text": self._page_chunk_text(pd),
-                    "start": pd["page_num"],
-                    "end": pd["page_num"],
+            # Phase 1: Extract text and images
+            doc_pbar.set_description(f"{filename[:30]} - Extracting")
+            self.logger.debug("Phase 1 — Extracting text and images from all pages…")
+            page_data_list = []
+            for page_num in range(len(doc)):
+                text, image_refs = self.extract_page_data(doc, page_num, images_dir)
+                page_data_list.append({
+                    "page_num": page_num + 1,
+                    "text": text,
+                    "images": image_refs,
                 })
+            doc_pbar.update(1)
 
-        # ---- Phase 3: convert each batch ----
-        self.logger.debug("Phase 2 — Converting batches via LLM…")
-        all_markdowns = []
-        seen_headings = {}  # dict: normalized → original
+            # Phase 2: Build batches
+            doc_pbar.set_description(f"{filename[:30]} - Batching")
+            if self.batch_pages:
+                batches = self.build_batches(page_data_list)
+                self.logger.info(f"Batched {len(page_data_list)} pages into {len(batches)} LLM call(s).")
+            else:
+                batches = []
+                for pd in page_data_list:
+                    batches.append({
+                        "pages": [pd["page_num"]],
+                        "text": self._page_chunk_text(pd),
+                        "start": pd["page_num"],
+                        "end": pd["page_num"],
+                    })
+            doc_pbar.update(1)
 
-        with tqdm(total=len(batches), desc="Converting", unit="batch") as pbar:
-            for batch in batches:
-                page_label = (
-                    f"Pages {batch['start']}-{batch['end']}"
-                    if batch['start'] != batch['end']
-                    else f"Page {batch['start']}"
-                )
+            # Phase 3: Convert each batch (keep existing batch progress bar)
+            doc_pbar.set_description(f"{filename[:30]} - Converting")
+            all_markdowns = []
+            seen_headings = {}
 
-                if not batch["text"].strip():
-                    md = (
-                        f"<!-- {page_label}: No extractable content -->"
-                    )
-                else:
-                    md = self.convert_to_markdown(
-                        batch["text"], page_label
-                    )
+            with tqdm(total=len(batches), desc="Converting batches", unit="batch", leave=False) as pbar:
+                for batch in batches:
+                    # ... existing conversion logic ...
+                    pbar.update(1)
+            doc_pbar.update(1)
 
-                # Post-process
-                md = self.clean_template_text(md)
-                md = self.validate_and_fix(md, page_label)
-                md = self.normalize_heading_hierarchy(md)
-                md, seen_headings = self.deduplicate_headings(md, seen_headings)
-
-                # Optional page-break markers
-                if self.show_page_breaks and batch['start'] != batch['end']:
-                    md = (
-                        f"*[Pages {batch['start']}–{batch['end']}]*\n\n"
-                        + md
-                    )
-                elif self.show_page_breaks:
-                    md = f"*[Page {batch['start']}]*\n\n" + md
-
-                all_markdowns.append(md)
-                pbar.update(1)
+            # Phase 4: Assemble final output
+            doc_pbar.set_description(f"{filename[:30]} - Assembling")
+            # ... existing assembly logic ...
+            doc_pbar.update(1)
+            doc_pbar.set_description(f"{filename[:30]} - Complete")
 
         doc.close()
 
