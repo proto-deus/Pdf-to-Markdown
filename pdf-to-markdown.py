@@ -11,27 +11,21 @@ import logging
 import random
 from tqdm import tqdm
 from pathlib import Path
-
 # Optional OCR support for scanned documents
 try:
     import pytesseract
     from PIL import Image
     import io
-
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
-
 # Optional numpy for OCR preprocessing
 try:
     import numpy as np
-
     NUMPY_AVAILABLE = True
 except ImportError:
     NUMPY_AVAILABLE = False
-
 CONFIG_FILE = "config.json"
-
 # Patterns that indicate LLM-generated template/placeholder text
 TEMPLATE_PATTERNS = [
     r'\[insert\s+actual\s+heading',
@@ -58,21 +52,16 @@ TEMPLATE_PATTERNS = [
     r'i\s+cannot\s+process',
     r'please\s+provide\s+the\s+actual',
 ]
-
 TEMPLATE_REGEX = re.compile('|'.join(TEMPLATE_PATTERNS), re.IGNORECASE)
-
-
 class PDFProcessor:
     def __init__(self, config_path=CONFIG_FILE):
         self.load_config(config_path)
         self.setup_client()
         self.enc = tiktoken.get_encoding("cl100k_base")
         self.setup_logging()
-
     # ------------------------------------------------------------------ #
     #  Configuration
     # ------------------------------------------------------------------ #
-
     def load_config(self, path):
         """Loads settings from JSON or creates a default."""
         if not os.path.exists(path):
@@ -109,53 +98,42 @@ class PDFProcessor:
         self.img_max_aspect = self.conv_settings.get("image_max_aspect_ratio", 50)
         self.img_white_threshold = self.conv_settings.get("image_white_ratio_threshold", 0.98)
         self.img_tiny_boost = self.conv_settings.get("image_tiny_boost", True)
-
-
     def setup_client(self):
         """Initializes the OpenAI-compatible client."""
         self.client = openai.OpenAI(
             base_url=self.base_url,
             api_key=self.api_key
         )
-
     def setup_logging(self):
         """Configure structured logging to file and console. (Improvement #8)"""
         log_file = self.io_settings.get("log_file", "pdf_converter.log")
         log_level_str = self.io_settings.get("log_level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
-
         # Avoid duplicate handlers if called more than once
         root_logger = logging.getLogger("pdf_converter")
         if root_logger.handlers:
             self.logger = root_logger
             return
-
         root_logger.setLevel(log_level)
         root_logger.propagate = False
-
         fmt = logging.Formatter(
             "%(asctime)s [%(levelname)-8s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
-
         # File handler — always captures everything down to DEBUG
         fh = logging.FileHandler(log_file, encoding="utf-8")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         root_logger.addHandler(fh)
-
         # Console handler — follows configured level
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(log_level)
         ch.setFormatter(fmt)
         root_logger.addHandler(ch)
-
         self.logger = root_logger
-
     # ------------------------------------------------------------------ #
     #  File discovery
     # ------------------------------------------------------------------ #
-
     def get_files(self):
         """Locates PDF files based on input settings."""
         input_path = self.io_settings.get("input_path", ".")
@@ -175,14 +153,11 @@ class PDFProcessor:
                 if not recursive:
                     break
         return files_to_process, output_path
-
     def num_tokens(self, text: str) -> int:
         return len(self.enc.encode(text))
-
     # ------------------------------------------------------------------ #
     #  Template detection / cleaning
     # ------------------------------------------------------------------ #
-
     def is_template_text(self, text):
         """Check if text contains LLM template/placeholder patterns."""
         if not text or not text.strip():
@@ -192,7 +167,6 @@ class PDFProcessor:
         if re.search(r'#{1,6}\s+.*\[(?:insert|enter|add|your)\b', text, re.IGNORECASE):
             return True
         return False
-
     def clean_template_text(self, text):
         """Remove template/placeholder lines from LLM output."""
         if not text:
@@ -200,14 +174,11 @@ class PDFProcessor:
         lines = text.split('\n')
         clean_lines = []
         in_template_block = False
-
         for line in lines:
             stripped = line.strip()
-
             if TEMPLATE_REGEX.search(line):
                 in_template_block = True
                 continue
-
             heading_match = re.match(r'^(#{1,6})\s+(.*)', line)
             if heading_match:
                 heading_text = heading_match.group(2).strip()
@@ -216,25 +187,19 @@ class PDFProcessor:
                         TEMPLATE_REGEX.search(heading_text)):
                     in_template_block = True
                     continue
-
             if stripped.startswith('> ') and TEMPLATE_REGEX.search(stripped):
                 continue
-
             if stripped == '---' and in_template_block:
                 in_template_block = False
                 continue
-
             in_template_block = False
             clean_lines.append(line)
-
         result = '\n'.join(clean_lines)
         result = re.sub(r'\n{4,}', '\n\n\n', result)
         return result.strip()
-
     # ------------------------------------------------------------------ #
     #  Image relevance
     # ------------------------------------------------------------------ #
-
     def is_image_likely_irrelevant(self, rect, pix):
         """
         Fast heuristic pre-filter to skip irrelevant images before LLM call.
@@ -243,26 +208,21 @@ class PDFProcessor:
         # --- Dimension check (configurable) ---
         if rect.width < self.img_min_width or rect.height < self.img_min_height:
             return True
-
         aspect_ratio = rect.width / rect.height
         if aspect_ratio > self.img_max_aspect or aspect_ratio < self.img_min_aspect:
             return True
-
         # --- Content / pixel-density check ---
         if pix:
             try:
                 step = pix.n
                 samples = pix.samples
                 total_pixels = len(samples) // step
-
                 if total_pixels == 0:
                     return True
-
                 # Sample proportionally — check up to 10k pixels
                 max_samples = 10000
                 pixel_stride = max(1, total_pixels // max_samples)
                 stride = pixel_stride * step
-
                 white_count = 0
                 total_checked = 0
                 for i in range(0, len(samples) - step + 1, stride):
@@ -272,12 +232,9 @@ class PDFProcessor:
                     if r > 240 and g > 240 and b > 240:
                         white_count += 1
                     total_checked += 1
-
                 if total_checked == 0:
                     return True
-
                 white_ratio = white_count / total_checked
-
                 # For small images, use a higher white-ratio threshold
                 # (they tend to have proportionally more border whitespace
                 #  around the actual content)
@@ -289,15 +246,11 @@ class PDFProcessor:
                         # Scale from threshold at 10000 up to 0.998 at 400 (20×20)
                         tiny_scale = max(0, (area - 400) / (10000 - 400))
                         threshold = 0.998 - (0.998 - threshold) * tiny_scale
-
                 if white_ratio > threshold:
                     return True
-
             except Exception:
                 pass
-
         return False
-
     def is_image_relevant(self, image_bytes, page_text):
         """Sends the image and text context to the LLM to check relevance."""
         if not self.filter_images:
@@ -345,11 +298,9 @@ class PDFProcessor:
                 f"Image relevance check failed (is the model multimodal?): {e}"
             )
             return False
-
     # ------------------------------------------------------------------ #
     #  LLM call with retry
     # ------------------------------------------------------------------ #
-
     def call_llm_with_retry(self, messages, max_tokens, max_retries=3,
                             temperature=None):
         """Call the LLM with exponential backoff on transient errors."""
@@ -386,11 +337,9 @@ class PDFProcessor:
                 else:
                     raise  # Don't retry 4xx client errors
         raise RuntimeError(f"LLM call failed after {max_retries} attempts.")
-
     # ------------------------------------------------------------------ #
     #  Heading hierarchy & deduplication  (Improvement #3)
     # ------------------------------------------------------------------ #
-
     @staticmethod
     def normalize_heading_text(text):
         """Normalize heading text for comparison (case, whitespace, punctuation)."""
@@ -398,7 +347,6 @@ class PDFProcessor:
         text = re.sub(r'\s+', ' ', text)
         text = re.sub(r'[^\w\s]', '', text)
         return text
-
     def normalize_heading_hierarchy(self, markdown_text):
         """
         Ensure heading levels are logically consistent:
@@ -408,29 +356,23 @@ class PDFProcessor:
         lines = markdown_text.split('\n')
         new_lines = []
         last_level = 0
-
         for line in lines:
             match = re.match(r'^(#{1,6})\s+(.*)', line)
             if match:
                 text = match.group(2).strip()
                 level = len(match.group(1))
-
                 # Don't jump more than one level deeper than the last heading
                 if last_level > 0 and level > last_level + 1:
                     level = last_level + 1
-
                 # Demote very short "headings" that are probably just bold text
                 if len(text) < 3 and level <= 2:
                     new_lines.append(f"**{text}**")
                     continue
-
                 last_level = level
                 new_lines.append(f"{'#' * level} {text}")
             else:
                 new_lines.append(line)
-
         return '\n'.join(new_lines)
-
     def deduplicate_headings(self, markdown_text, seen_headings):
         """
         Removes duplicate headings. Uses normalized text for comparison.
@@ -451,11 +393,9 @@ class PDFProcessor:
             else:
                 new_lines.append(line)
         return "\n".join(new_lines), seen_headings
-
     # ------------------------------------------------------------------ #
     #  Table of Contents generation  (Improvement #4)
     # ------------------------------------------------------------------ #
-
     def generate_table_of_contents(self, all_page_markdowns):
         """
         Scan all collected Markdown for headings and build a linked TOC.
@@ -472,10 +412,8 @@ class PDFProcessor:
                     if TEMPLATE_REGEX.search(text):
                         continue
                     headings_found.append((level, text))
-
         if not headings_found:
             return ""
-
         toc_lines = ["# Table of Contents\n"]
         seen_anchors = {}
         for level, text in headings_found:
@@ -490,13 +428,10 @@ class PDFProcessor:
                 seen_anchors[anchor] = 0
             indent = "  " * (level - 1)
             toc_lines.append(f"{indent}- [{text}](#{anchor})")
-
         return "\n".join(toc_lines)
-
     # ------------------------------------------------------------------ #
     #  OCR helpers  (Improvement #6 — language & preprocessing)
     # ------------------------------------------------------------------ #
-
     def extract_text_ocr(self, page, page_num):
         """Extract text from a scanned page using OCR."""
         if not OCR_AVAILABLE:
@@ -507,10 +442,8 @@ class PDFProcessor:
             pix = page.get_pixmap(matrix=mat)
             img_data = pix.tobytes("png")
             image = Image.open(io.BytesIO(img_data))
-
             if self.ocr_preprocess and NUMPY_AVAILABLE:
                 image = self._preprocess_for_ocr(image)
-
             text = pytesseract.image_to_string(image, lang=self.ocr_language)
             result = text.strip()
             self.logger.debug(
@@ -521,18 +454,15 @@ class PDFProcessor:
         except Exception as e:
             self.logger.warning(f"OCR failed on page {page_num}: {e}")
             return ""
-
     @staticmethod
     def _preprocess_for_ocr(image):
         """Preprocess image to improve OCR accuracy."""
         img_array = np.array(image)
-
         # Convert to grayscale
         if len(img_array.shape) == 3:
             gray = np.mean(img_array[:, :, :3], axis=2).astype(np.uint8)
         else:
             gray = img_array
-
         # Stretch histogram for contrast
         p2, p98 = np.percentile(gray, (2, 98))
         if p98 > p2:
@@ -540,11 +470,9 @@ class PDFProcessor:
                 (gray.astype(np.float64) - p2) / (p98 - p2) * 255,
                 0, 255
             ).astype(np.uint8)
-
         # Simple binarisation
         binary = np.where(gray > 128, 255, 0).astype(np.uint8)
         return Image.fromarray(binary)
-
     def strip_existing_text(self, page):
         """
         Redact all existing text on a page to force fresh OCR extraction.
@@ -554,7 +482,6 @@ class PDFProcessor:
             # Extract text blocks with their bounding boxes
             text_dict = page.get_text("dict")
             redactions_made = 0
-
             for block in text_dict.get("blocks", []):
                 if block.get("type") == 0:  # text block
                     for line in block.get("lines", []):
@@ -569,20 +496,16 @@ class PDFProcessor:
                                 rect.y1 += 1
                                 page.add_redact_annot(rect)
                                 redactions_made += 1
-
             if redactions_made > 0:
                 page.apply_redactions()
                 self.logger.debug(
                     f"Stripped {redactions_made} text spans from page."
                 )
                 return True
-
         except Exception as e:
             self.logger.warning(f"Failed to strip existing text: {e}")
             return False
-
         return False
-
     def check_if_scanned(self, doc):
         """Check if a PDF appears to be scanned (very little extractable text)."""
         pages_to_check = min(5, len(doc))
@@ -592,7 +515,6 @@ class PDFProcessor:
             if len(text) < 50:
                 empty_pages += 1
         return empty_pages > pages_to_check * 0.7
-
     def page_has_ocr_text_layer(self, page):
         """
         Determine if a page has an existing OCR text layer (prior OCR already applied).
@@ -605,26 +527,20 @@ class PDFProcessor:
             return len(text) > 0
         except Exception:
             return False
-
     # ------------------------------------------------------------------ #
     #  Page extraction helpers
     # ------------------------------------------------------------------ #
-
     def is_cover_page(self, page, page_num):
         """Heuristic to determine if a page is actually a cover page."""
         if page_num != 0:
             return False
-
         text = page.get_text("text").strip()
         text_length = len(text)
-
         # Count extracted images
         images = page.get_images(full=True)
         num_images = len(images)
-
         # Check if this might be a scanned page (minimal text)
         is_likely_scanned = text_length < 100
-
         # For scanned documents, be more conservative about what counts as a cover page
         if is_likely_scanned:
             # Only consider it a cover if it has very few lines and clear title structure
@@ -632,27 +548,28 @@ class PDFProcessor:
             if len(lines) <= 2 and text_length < 150:
                 return True
             return False
-
         # For normal documents, use original logic
         # Check if the page is mostly graphical with minimal text
         if num_images >= 1 and text_length < 200:
             return True
-
         # Fallback: if very little text and it looks like a title/heading pattern
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         if len(lines) <= 3 and text_length < 300:
             return True
-
         return False
-
-    def extract_page_data(self, doc, page_num, images_dir):
+    def extract_page_data(self, doc, page_num, images_dir, ocr_pbar=None):
         """
         Extract raw text and image references for a single page.
         Returns (text, image_refs).
+
+        Args:
+            doc: The PDF document.
+            page_num: Zero-based page number.
+            images_dir: Directory to save images.
+            ocr_pbar: Optional tqdm progress bar to update on OCR operations.
         """
         page = doc[page_num]
         text = page.get_text("text").strip()
-
         # If configured, strip existing OCR text layer — but only when the page
         # already has a text layer that looks like prior OCR (sparse or low quality).
         if self.strip_existing_ocr and self.page_has_ocr_text_layer(page):
@@ -663,21 +580,20 @@ class PDFProcessor:
                     f"forcing re-OCR."
                 )
                 text = ""  # Force OCR since we just removed existing text
-
         # Fallback to OCR when native extraction is too sparse
         if len(text) < 50:
             ocr_text = self.extract_text_ocr(page, page_num + 1)
             if len(ocr_text) > len(text):
                 text = ocr_text
-
+            # Update OCR progress bar after OCR completes
+            if ocr_pbar is not None:
+                ocr_pbar.update(1)
         # Discard template-like extracted text
         if text and self.is_template_text(text):
             text = ""
-
         image_refs = []
         if not self.save_images:
             return text, image_refs
-
         is_cover_page = self.is_cover_page(page, page_num)
         if is_cover_page:
             image_refs = self._save_cover_snapshot(page, page_num, images_dir)
@@ -685,9 +601,7 @@ class PDFProcessor:
             image_refs = self._save_page_images(
                 doc, page, page_num, images_dir, text
             )
-
         return text, image_refs
-
     def _save_cover_snapshot(self, page, page_num, images_dir):
         """Render and save a cover page snapshot."""
         image_refs = []
@@ -706,20 +620,16 @@ class PDFProcessor:
         except Exception as e:
             self.logger.warning(f"Failed to save cover page snapshot: {e}")
         return image_refs
-
     def _save_page_images(self, doc, page, page_num, images_dir, text):
         """Extract, filter, and save relevant images from a page."""
         image_refs = []
         img_list = page.get_images(full=True)
-
         # Get page dimensions
         page_rect = page.rect
         page_area = page_rect.width * page_rect.height
-
         # Check if this page might be a scanned page (minimal text)
         # We'll use this to be more aggressive about skipping large images
         is_likely_scanned = len(text.strip()) < 100
-
         for i, img in enumerate(img_list):
             try:
                 xref = img[0]
@@ -727,21 +637,17 @@ class PDFProcessor:
                 if not rects:
                     continue
                 rect = rects[0]
-
                 # Calculate coverage of this image relative to the page
                 img_area = rect.width * rect.height
                 coverage_ratio = img_area / page_area if page_area > 0 else 0
-
                 # Skip background scan images with multiple detection methods
                 should_skip = False
                 skip_reason = ""
-
                 # Method 1: Check if image covers most of the page (>75% for scanned, >95% for normal)
                 coverage_threshold = 0.75 if is_likely_scanned else 0.95
                 if coverage_ratio > coverage_threshold:
                     should_skip = True
                     skip_reason = f"covers {coverage_ratio:.1%} of page"
-
                 # Method 2: Check if image is positioned as a full-page background
                 # (starts near top-left, extends to bottom-right)
                 elif (abs(rect.x0) < 10 and abs(rect.y0) < 10 and
@@ -749,29 +655,24 @@ class PDFProcessor:
                       abs(rect.y1 - page_rect.y1) < 10):
                     should_skip = True
                     skip_reason = "full-page background positioning"
-
                 # Method 3: Check if image is the only image and covers >75% of page
                 # (common in scanned documents where each page is one image)
                 elif len(img_list) == 1 and coverage_ratio > 0.75:
                     should_skip = True
                     skip_reason = "single image covering >75% of page"
-
                 # Method 4: For scanned documents, skip any image covering >40%
                 # (scanned documents often have one large background image)
                 elif is_likely_scanned and coverage_ratio > 0.4:
                     should_skip = True
                     skip_reason = f"large image ({coverage_ratio:.1%}) on text-sparse page"
-
                 if should_skip:
                     self.logger.debug(
                         f"Skipping image {i} on page {page_num+1}: "
                         f"{skip_reason} (likely background scan)"
                     )
                     continue
-
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
-
                 # Use higher render scale for small images so the
                 # LLM (and pixel-density check) has more to work with
                 area = rect.width * rect.height
@@ -781,15 +682,12 @@ class PDFProcessor:
                     scale = 3.0
                 else:
                     scale = 2.0
-
                 mat = fitz.Matrix(scale, scale)
                 pix = page.get_pixmap(matrix=mat, clip=rect)
                 if page.rotation != 0:
                     pix = pix.rotate(page.rotation)
-
                 if self.is_image_likely_irrelevant(rect, pix):
                     continue
-
                 img_bytes = pix.tobytes("jpeg")
                 if self.is_image_relevant(img_bytes, text):
                     prefix = self.conv_settings.get('image_prefix', 'img')
@@ -810,11 +708,9 @@ class PDFProcessor:
                     f"{img_err}"
                 )
         return image_refs
-
     # ------------------------------------------------------------------ #
     #  Page batching  (Improvement #10)
     # ------------------------------------------------------------------ #
-
     def _page_chunk_text(self, page_data):
         """Combine a page's text and image refs into a single string."""
         parts = []
@@ -823,14 +719,12 @@ class PDFProcessor:
         if page_data["images"]:
             parts.append("\n".join(page_data["images"]))
         return "\n\n".join(parts) if parts else ""
-
     def _should_merge_page(self, current_tokens, next_text):
         """Return True when adding next_text stays within the fill ratio."""
         next_tokens = self.num_tokens(next_text)
         return (current_tokens + next_tokens) < (
                 self.max_tokens * self.batch_fill_ratio
         )
-
     def build_batches(self, page_data_list):
         """
         Merge small consecutive pages into batches so the LLM
@@ -839,7 +733,6 @@ class PDFProcessor:
         """
         batches = []
         current = {"pages": [], "text": "", "tokens": 0}
-
         for pd in page_data_list:
             page_text = self._page_chunk_text(pd)
             if not page_text.strip():
@@ -854,7 +747,6 @@ class PDFProcessor:
                         "end": pd["page_num"],
                     })
                 continue
-
             if (current["tokens"] > 0 and
                     not self._should_merge_page(current["tokens"], page_text)):
                 # Current batch is full — flush it
@@ -865,14 +757,12 @@ class PDFProcessor:
                     "end": current["pages"][-1],
                 })
                 current = {"pages": [], "text": "", "tokens": 0}
-
             current["pages"].append(pd["page_num"])
             if current["text"]:
                 current["text"] += "\n\n---\n\n" + page_text
             else:
                 current["text"] = page_text
             current["tokens"] = self.num_tokens(current["text"])
-
         # Don't forget the last batch
         if current["tokens"] > 0:
             batches.append({
@@ -881,25 +771,20 @@ class PDFProcessor:
                 "start": current["pages"][0],
                 "end": current["pages"][-1],
             })
-
         return batches
-
     # ------------------------------------------------------------------ #
     #  Main per-file processing
     # ------------------------------------------------------------------ #
-
     def process_file(self, pdf_path, output_dir):
         """Main logic to process a single PDF."""
         filename = os.path.basename(pdf_path)
         self.logger.info(f"Processing: {filename}")
-
         name_without_ext = os.path.splitext(filename)[0]
         file_output_dir = os.path.join(output_dir, name_without_ext)
         os.makedirs(file_output_dir, exist_ok=True)
         images_dir = os.path.join(file_output_dir, "images")
         if self.save_images:
             os.makedirs(images_dir, exist_ok=True)
-
         try:
             doc = fitz.open(pdf_path)
             if doc.needs_pass:
@@ -916,7 +801,6 @@ class PDFProcessor:
         except Exception as e:
             self.logger.error(f"Could not open PDF: {e}")
             return
-
         # Check if the document is scanned
         is_scanned = self.check_if_scanned(doc)
         if is_scanned:
@@ -930,20 +814,42 @@ class PDFProcessor:
                     "Scanned document detected but OCR is not available. "
                     "Install pytesseract & Pillow for scanned PDF support."
                 )
-
         # ---- Phase 1: extract all pages ----
         self.logger.debug("Phase 1 — Extracting text and images from all pages…")
         page_data_list = []
+        # Pre-count pages that will need OCR for progress bar
+        ocr_page_count = 0
         for page_num in range(len(doc)):
-            text, image_refs = self.extract_page_data(
-                doc, page_num, images_dir
-            )
-            page_data_list.append({
-                "page_num": page_num + 1,
-                "text": text,
-                "images": image_refs,
-            })
-
+            page = doc[page_num]
+            text = page.get_text("text").strip()
+            # Check if OCR will likely be triggered for this page
+            if self.strip_existing_ocr and self.page_has_ocr_text_layer(page):
+                ocr_page_count += 1
+            elif len(text) < 50:
+                ocr_page_count += 1
+        # Only show OCR progress bar if there are pages that need OCR
+        use_ocr_pbar = ocr_page_count > 0 and is_scanned
+        if use_ocr_pbar:
+            with tqdm(total=ocr_page_count, desc="Extracting (OCR)", unit="page") as ocr_pbar:
+                for page_num in range(len(doc)):
+                    text, image_refs = self.extract_page_data(
+                        doc, page_num, images_dir, ocr_pbar
+                    )
+                    page_data_list.append({
+                        "page_num": page_num + 1,
+                        "text": text,
+                        "images": image_refs,
+                    })
+        else:
+            for page_num in range(len(doc)):
+                text, image_refs = self.extract_page_data(
+                    doc, page_num, images_dir
+                )
+                page_data_list.append({
+                    "page_num": page_num + 1,
+                    "text": text,
+                    "images": image_refs,
+                })
         # ---- Phase 2: build batches ----
         if self.batch_pages:
             batches = self.build_batches(page_data_list)
@@ -960,12 +866,10 @@ class PDFProcessor:
                     "start": pd["page_num"],
                     "end": pd["page_num"],
                 })
-
         # ---- Phase 3: convert each batch ----
         self.logger.debug("Phase 2 — Converting batches via LLM…")
         all_markdowns = []
         seen_headings = {}  # dict: normalized → original
-
         with tqdm(total=len(batches), desc="Converting", unit="batch") as pbar:
             for batch in batches:
                 page_label = (
@@ -973,7 +877,6 @@ class PDFProcessor:
                     if batch['start'] != batch['end']
                     else f"Page {batch['start']}"
                 )
-
                 if not batch["text"].strip():
                     md = (
                         f"<!-- {page_label}: No extractable content -->"
@@ -982,13 +885,11 @@ class PDFProcessor:
                     md = self.convert_to_markdown(
                         batch["text"], page_label
                     )
-
                 # Post-process
                 md = self.clean_template_text(md)
                 md = self.validate_and_fix(md, page_label)
                 md = self.normalize_heading_hierarchy(md)
                 md, seen_headings = self.deduplicate_headings(md, seen_headings)
-
                 # Optional page-break markers
                 if self.show_page_breaks and batch['start'] != batch['end']:
                     md = (
@@ -997,29 +898,21 @@ class PDFProcessor:
                     )
                 elif self.show_page_breaks:
                     md = f"*[Page {batch['start']}]*\n\n" + md
-
                 all_markdowns.append(md)
                 pbar.update(1)
-
         doc.close()
-
-        # ---- Phase 4: assemble final output ----
+        # ---- Phase 4: assemble final output (no progress bar — instant) ----
         self.logger.debug("Phase 3 — Assembling final Markdown…")
-
         parts = []
-
         # Table of contents
         if self.generate_toc:
             toc = self.generate_table_of_contents(all_markdowns)
             if toc:
                 parts.append(toc)
                 self.logger.info("Table of Contents generated.")
-
         # Page content
         parts.extend(all_markdowns)
-
         combined = "\n\n---\n\n".join(p for p in parts if p.strip())
-
         if not combined or all(
                 line.startswith('<!--') or not line.strip()
                 for line in combined.split('\n')
@@ -1028,18 +921,15 @@ class PDFProcessor:
                 f"No meaningful content extracted from {filename}"
             )
             combined = "<!-- No content extracted -->"
-
         output_md_path = os.path.join(
             file_output_dir, f"{name_without_ext}.md"
         )
         with open(output_md_path, "w", encoding="utf-8") as f:
             f.write(combined)
         self.logger.info(f"Saved to: {output_md_path}")
-
     # ------------------------------------------------------------------ #
     #  LLM conversion
     # ------------------------------------------------------------------ #
-
     def convert_to_markdown(self, text_chunk, page_label):
         """Sends text to LLM for Markdown conversion."""
         system_prompt = (
@@ -1075,7 +965,6 @@ class PDFProcessor:
             f"mark headings clearly. The text includes image references that MUST "
             f"be preserved exactly as they appear:\n\n{text_chunk}"
         )
-
         try:
             result = self.call_llm_with_retry(
                 messages=[
@@ -1084,20 +973,16 @@ class PDFProcessor:
                 ],
                 max_tokens=self.conv_settings.get("max_tokens_response", 4000)
             )
-
             result = self.clean_template_text(result)
-
             if self.is_template_text(result):
                 self.logger.warning(
                     f"{page_label}: LLM returned template text. Discarding."
                 )
                 return ""
-
             return result
         except Exception as e:
             self.logger.error(f"API call failed for {page_label}: {e}")
             return f"**Error converting {page_label}**"
-
     def validate_and_fix(self, text, page_label):
         """Simple heuristic error detection."""
         if not text or len(text.strip()) < 10:
@@ -1105,14 +990,11 @@ class PDFProcessor:
                 f"{page_label}: returned very little text."
             )
         return text
-
     # ------------------------------------------------------------------ #
     #  Entry point
     # ------------------------------------------------------------------ #
-
     def run(self):
         self.logger.info("--- PDF to Markdown Converter ---")
-
         if not OCR_AVAILABLE:
             self.logger.info(
                 "OCR not available. Install pytesseract and Pillow for "
@@ -1123,12 +1005,10 @@ class PDFProcessor:
                 "numpy not installed — OCR preprocessing disabled. "
                 "Install with:  pip install numpy"
             )
-
         files, output_dir = self.get_files()
         if not files:
             self.logger.error("No PDF files found.")
             return
-
         self.logger.info(
             f"Found {len(files)} file(s). Output: {output_dir}"
         )
@@ -1137,7 +1017,6 @@ class PDFProcessor:
             f"Page batching: {'ON' if self.batch_pages else 'OFF'} | "
             f"TOC: {'ON' if self.generate_toc else 'OFF'}"
         )
-
         for file_path in tqdm(files, desc="Total Files"):
             try:
                 self.process_file(file_path, output_dir)
@@ -1146,11 +1025,8 @@ class PDFProcessor:
                     f"Failed to process {file_path}: {e}",
                     exc_info=True
                 )
-
-
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser(
         description="Convert PDF documents to clean Markdown using an LLM."
     )
@@ -1159,6 +1035,5 @@ if __name__ == "__main__":
         help="Path to config file (default: config.json)"
     )
     args = parser.parse_args()
-
     processor = PDFProcessor(config_path=args.config)
     processor.run()
