@@ -262,8 +262,7 @@ class PDFProcessor:
                 "You are a strict image relevance classifier. "
                 "Analyze the provided image.\n\n"
                 "REJECT (return NO) and do NOT save if the image is: "
-                "Words, text, one or more paragraphs, a book page, part of a book page,"
-                "a heading, a title a page number, a header/footer ornament, a decorative border "
+                "Words, text, one or more paragraphs, a book page, part of a book page, a heading, a title a page number, a header/footer ornament, a decorative border "
                 "element, a bullet-point glyph, a tiny company logo watermark, "
                 "or any lines of running text extracted from the page body.\n\n"
                 "ACCEPT (return YES) and save if the image is ANY of the following "
@@ -558,16 +557,17 @@ class PDFProcessor:
         if len(lines) <= 3 and text_length < 300:
             return True
         return False
-    def extract_page_data(self, doc, page_num, images_dir, ocr_pbar=None):
+
+    def extract_page_data(self, doc, page_num, images_dir, ocr_pbar=None, image_pbar=None):
         """
         Extract raw text and image references for a single page.
         Returns (text, image_refs).
-
         Args:
             doc: The PDF document.
             page_num: Zero-based page number.
             images_dir: Directory to save images.
             ocr_pbar: Optional tqdm progress bar to update on OCR operations.
+            image_pbar: Optional tqdm progress bar to update on image filtering operations.
         """
         page = doc[page_num]
         text = page.get_text("text").strip()
@@ -600,9 +600,10 @@ class PDFProcessor:
             image_refs = self._save_cover_snapshot(page, page_num, images_dir)
         else:
             image_refs = self._save_page_images(
-                doc, page, page_num, images_dir, text
+                doc, page, page_num, images_dir, text, image_pbar
             )
         return text, image_refs
+
     def _save_cover_snapshot(self, page, page_num, images_dir):
         """Render and save a cover page snapshot."""
         image_refs = []
@@ -621,7 +622,17 @@ class PDFProcessor:
         except Exception as e:
             self.logger.warning(f"Failed to save cover page snapshot: {e}")
         return image_refs
-    def _save_page_images(self, doc, page, page_num, images_dir, text):
+
+    def _count_total_images(self, doc):
+        """Count total images across all pages for progress tracking."""
+        total = 0
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            img_list = page.get_images(full=True)
+            total += len(img_list)
+        return total
+
+    def _save_page_images(self, doc, page, page_num, images_dir, text, image_pbar=None):
         """Extract, filter, and save relevant images from a page."""
         image_refs = []
         img_list = page.get_images(full=True)
@@ -678,11 +689,11 @@ class PDFProcessor:
                 # LLM (and pixel-density check) has more to work with
                 area = rect.width * rect.height
                 if area < 2500:  # under ~50×50
-                    scale = 4.0
-                elif area < 10000:  # under ~100×100
-                    scale = 3.0
-                else:
                     scale = 2.0
+                elif area < 10000:  # under ~100×100
+                    scale = 1.5
+                else:
+                    scale = 1.0
                 mat = fitz.Matrix(scale, scale)
                 pix = page.get_pixmap(matrix=mat, clip=rect)
                 if page.rotation != 0:
@@ -708,6 +719,9 @@ class PDFProcessor:
                     f"Error processing image {i} on page {page_num + 1}: "
                     f"{img_err}"
                 )
+            finally:
+                if image_pbar is not None:
+                    image_pbar.update(1)
         return image_refs
     # ------------------------------------------------------------------ #
     #  Page batching  (Improvement #10)
@@ -823,24 +837,42 @@ class PDFProcessor:
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text").strip()
-            # Check if OCR will likely be triggered for this page
             if self.strip_existing_ocr and self.page_has_ocr_text_layer(page):
                 ocr_page_count += 1
             elif len(text) < 50:
                 ocr_page_count += 1
-        # Only show OCR progress bar if there are pages that need OCR
         use_ocr_pbar = ocr_page_count > 0 and is_scanned
+        # Count total images for image filtering progress bar
+        total_images = self._count_total_images(doc) if self.save_images and self.filter_images else 0
+        use_image_pbar = total_images > 0
+        # Create progress bars as needed
+        pbar_contexts = []
         if use_ocr_pbar:
-            with tqdm(total=ocr_page_count, desc="Extracting (OCR)", unit="page") as ocr_pbar:
+            pbar_contexts.append(
+                tqdm(total=ocr_page_count, desc="Extracting (OCR)", unit="page",
+                     position=0, leave=True)
+            )
+        if use_image_pbar:
+            pbar_contexts.append(
+                tqdm(total=total_images, desc="Filtering images (LLM)", unit="img",
+                     position=1 if use_ocr_pbar else 0, leave=True)
+            )
+        if pbar_contexts:
+            ocr_pbar = pbar_contexts[0] if use_ocr_pbar else None
+            image_pbar = pbar_contexts[-1] if use_image_pbar else None
+            try:
                 for page_num in range(len(doc)):
                     text, image_refs = self.extract_page_data(
-                        doc, page_num, images_dir, ocr_pbar
+                        doc, page_num, images_dir, ocr_pbar, image_pbar
                     )
                     page_data_list.append({
                         "page_num": page_num + 1,
                         "text": text,
                         "images": image_refs,
                     })
+            finally:
+                for pb in pbar_contexts:
+                    pb.close()
         else:
             for page_num in range(len(doc)):
                 text, image_refs = self.extract_page_data(
@@ -870,7 +902,7 @@ class PDFProcessor:
         # ---- Phase 3: convert each batch ----
         self.logger.debug("Phase 2 — Converting batches via LLM…")
         all_markdowns = []
-        seen_headings = {}  # dict: normalized → original
+        seen_headings = {}
         with tqdm(total=len(batches), desc="Converting", unit="batch") as pbar:
             for batch in batches:
                 page_label = (
@@ -886,12 +918,10 @@ class PDFProcessor:
                     md = self.convert_to_markdown(
                         batch["text"], page_label
                     )
-                # Post-process
                 md = self.clean_template_text(md)
                 md = self.validate_and_fix(md, page_label)
                 md = self.normalize_heading_hierarchy(md)
                 md, seen_headings = self.deduplicate_headings(md, seen_headings)
-                # Optional page-break markers
                 if self.show_page_breaks and batch['start'] != batch['end']:
                     md = (
                         f"*[Pages {batch['start']}–{batch['end']}]*\n\n"
@@ -902,16 +932,14 @@ class PDFProcessor:
                 all_markdowns.append(md)
                 pbar.update(1)
         doc.close()
-        # ---- Phase 4: assemble final output (no progress bar — instant) ----
+        # ---- Phase 4: assemble final output ----
         self.logger.debug("Phase 3 — Assembling final Markdown…")
         parts = []
-        # Table of contents
         if self.generate_toc:
             toc = self.generate_table_of_contents(all_markdowns)
             if toc:
                 parts.append(toc)
                 self.logger.info("Table of Contents generated.")
-        # Page content
         parts.extend(all_markdowns)
         combined = "\n\n---\n\n".join(p for p in parts if p.strip())
         if not combined or all(
