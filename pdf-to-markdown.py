@@ -154,7 +154,7 @@ class PDFProcessor:
         return len(self.enc.encode(text))
 
     # ------------------------------------------------------------------ #
-    #  Image resize & save helpers  (NEW)
+    #  Image resize & save helpers
     # ------------------------------------------------------------------ #
     def _resize_image(self, image, max_dim=None):
         """Scale an image down if its longest side exceeds max_dim pixels."""
@@ -544,7 +544,7 @@ class PDFProcessor:
         return text, image_refs
 
     # ------------------------------------------------------------------ #
-    #  Cover snapshot  (FIXED)
+    #  Cover snapshot
     # ------------------------------------------------------------------ #
     def _save_cover_snapshot(self, page, page_num, images_dir):
         """
@@ -556,15 +556,12 @@ class PDFProcessor:
         """
         image_refs = []
         try:
-            # Render at 3× for good quality without being excessive
             mat = fitz.Matrix(3.0, 3.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
-            # Handle page rotation
             if page.rotation != 0:
                 pix = pix.rotate(page.rotation)
 
-            # Convert pixmap → PIL → resize → save as JPEG
             image = self._pixmap_to_pil(pix)
 
             prefix = self.conv_settings.get('image_prefix', 'img')
@@ -585,7 +582,7 @@ class PDFProcessor:
         return image_refs
 
     # ------------------------------------------------------------------ #
-    #  Image extraction & saving  (UPDATED)
+    #  Image extraction & saving
     # ------------------------------------------------------------------ #
     def _count_total_images(self, doc):
         """Count total images across all pages for progress tracking."""
@@ -643,7 +640,6 @@ class PDFProcessor:
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
 
-                # Render scale for pixel-density check
                 area = rect.width * rect.height
                 if area < 2500:
                     scale = 2.0
@@ -660,7 +656,6 @@ class PDFProcessor:
                 if self.is_image_likely_irrelevant(rect, pix):
                     continue
 
-                # Convert to PIL, resize, and save as compressed JPEG
                 image = self._pixmap_to_pil(pix)
                 img_bytes_io = io.BytesIO()
                 image_for_check = self._resize_image(image)
