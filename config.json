@@ -17,7 +17,7 @@
     "generate_toc": true,
     "show_page_breaks": false,
     "pdf_password": "",
-    "strip_existing_ocr": false,
+    "force_ocr": true,
     "ocr_language": "eng",
     "ocr_preprocess": true,
     "ocr_dpi_scale": 3.0,
