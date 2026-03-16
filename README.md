@@ -106,7 +106,7 @@ Create a `config.json` in the project root (or copy from the example below):
         "generate_toc": true,
         "show_page_breaks": false,
         "pdf_password": "",
-        "strip_existing_ocr": false,
+        "force_ocr": true,
         "ocr_language": "eng",
         "ocr_preprocess": true,
         "ocr_dpi_scale": 3.0,
@@ -153,7 +153,7 @@ Create a `config.json` in the project root (or copy from the example below):
 | `generate_toc` | `true` | Prepend a linked Table of Contents from extracted headings. |
 | `show_page_breaks` | `false` | Add `*[Page N]*` markers between pages in output. |
 | `pdf_password` | `""` | Password for encrypted PDFs. |
-| `strip_existing_ocr` | `false` | Option to remove existing ocr from scanned documents. |
+| `force_ocr` | `false` | Force ocr to process each page. If text is found, it overrides existing ocr. |
 | `ocr_language` | `"eng"` | Tesseract language code. Combine with `+` (e.g. `"eng+fra"`). |
 | `ocr_preprocess` | `true` | Apply contrast/binarisation before OCR. Requires `numpy`. |
 | `ocr_dpi_scale` | `3.0` | Render scale for OCR images. Higher = more accurate but slower. |
