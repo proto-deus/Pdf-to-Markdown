@@ -73,7 +73,6 @@ brew install tesseract-lang
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/pdf-to-markdown.git
-cd pdf-to-markdown
 
 # Install Python dependencies
 pip install PyMuPDF openai tiktoken tqdm
@@ -135,7 +134,7 @@ Create a `config.json` in the project root (or copy from the example below):
 |---|---|---|
 | `base_url` | `http://localhost:11434/v1` | OpenAI-compatible API endpoint. Use `https://api.openai.com/v1` for OpenAI, or your Ollama/vLLM/LM Studio URL. |
 | `api_key` | `your-key-here` | API key (use `ollama` or any non-empty string for local servers that don't require one). |
-| `model` | `llama-3.2` | Model name. Must support chat completions. For image filtering, must be multimodal (vision). |
+| `model` | `llama-3.2` | Model name. Must support chat completions. For image filtering, must have vision support. |
 
 #### `conversion`
 
@@ -305,7 +304,7 @@ output/
 The image filtering step requires a vision-capable model. If your model
 doesn't support images, either:
 
-- Use a multimodal model (e.g. `llama3.2-vision`, `gpt-4o`, `minicpm-v`), or
+- Use a multimodal model (e.g. `llama3.2-vision`, `gpt-4o`), or
 - Disable image filtering:
   ```json
   "filter_images_by_llm": false
@@ -339,8 +338,8 @@ tesseract --version
 This usually means the model is too small or isn't following instructions well.
 Try:
 
+- Use an instruct model.
 - A larger / more capable model.
-- Lowering `temperature` to `0.0`.
 - Increasing `max_context_tokens` so the model gets more context.
 
 ## Requirements file
