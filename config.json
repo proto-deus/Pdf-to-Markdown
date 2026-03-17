@@ -2,37 +2,50 @@
   "llm_api": {
     "base_url": "http://localhost:11434/v1",
     "api_key": "your-key-here",
-    "model": "llama-3.2"
+    "model": "llama-3.2-vision"
   },
   "conversion": {
     "max_context_tokens": 4096,
     "chunk_overlap_tokens": 200,
-    "temperature": 0.1,
-    "max_tokens_response": 4000,
     "save_images": true,
     "filter_images_by_llm": true,
-    "image_prefix": "img",
     "batch_pages": true,
     "batch_fill_ratio": 0.6,
     "generate_toc": true,
     "show_page_breaks": false,
-    "pdf_password": "",
-    "force_ocr": true,
+    "force_ocr": false,
     "ocr_language": "eng",
-    "ocr_preprocess": true,
-    "ocr_dpi_scale": 3.0,
-    "image_min_width": 15,
-    "image_min_height": 15,
+    "image_min_width": 50,
+    "image_min_height": 50,
     "image_min_aspect_ratio": 0.02,
     "image_max_aspect_ratio": 50,
     "image_white_ratio_threshold": 0.98,
-    "image_tiny_boost": true
+    "image_tiny_boost": true,
+    "image_max_dimension": 2500,
+    "image_jpeg_quality": 80,
+    "image_min_size": 1500,
+    "temperature": 0.1,
+    "max_tokens_response": 4000,
+    "image_prefix": "img",
+    "cover_check_pages": 4
   },
   "input_output": {
-    "input_path": "./input",
-    "output_path": "./output",
+    "input_path": ".",
+    "output_path": "output",
     "recursive": true,
     "log_file": "pdf_converter.log",
     "log_level": "INFO"
+  },
+  "layout_detection": {
+    "enabled": true,
+    "model_path": "doclayout_yolo_docstructbench_imgsz1024.pt",
+    "confidence_threshold": 0.3,
+    "iou_threshold": 0.45,
+    "imgsz": 1024,
+    "device": "cpu",
+    "save_tables_as_images": true,
+    "table_render_scale": 3.0,
+    "layout_region_ocr": false,
+    "min_region_area": 500
   }
 }
