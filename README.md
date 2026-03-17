@@ -146,7 +146,7 @@ Create or edit `config.json`:
     "cover_check_pages": 4
   },
   "input_output": {
-    "input_path": ".",
+    "input_path": "input",
     "output_path": "output",
     "recursive": true,
     "log_file": "pdf_converter.log",
@@ -345,7 +345,7 @@ output/
 
 | Key | Default | Description |
 |---|---|---|
-| `input_path` | `.` | File or directory of PDFs to process |
+| `input_path` | `input` | File or directory of PDFs to process |
 | `output_path` | `output` | Output directory |
 | `recursive` | `true` | Search subdirectories for PDFs |
 | `log_file` | `pdf_converter.log` | Log file path |
