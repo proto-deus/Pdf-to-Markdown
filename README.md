@@ -92,6 +92,7 @@ torch>=1.8.0
 torchvision>=0.9.0
 opencv-python>=4.6.0
 numpy>=1.23.0
+huggingface_hub
 ```
 
 **CPU-only PyTorch (lighter install):**
