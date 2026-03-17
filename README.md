@@ -213,7 +213,7 @@ python PDF-to-Markdown.py --no-layout
 │  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  OR Legacy mode:                                            │
-│  → Extract text directly from page                          │
+│  → Extract text directly from page (Or OCR if required)     │
 │  → Extract embedded images via xref                         │
 │  → Pre-filter (heuristic) + LLM relevance check             │
 └─────────────────────────────────────────────────────────────┘
