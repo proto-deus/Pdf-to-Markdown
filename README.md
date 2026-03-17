@@ -141,7 +141,7 @@ Create or edit `config.json`:
     "image_jpeg_quality": 80,
     "image_min_size": 1500,
     "temperature": 0.1,
-    "max_tokens_response": 4000,
+    "max_tokens_response": 8192,
     "image_prefix": "img",
     "cover_check_pages": 4
   },
@@ -317,7 +317,7 @@ output/
 
 | Key | Default | Description |
 |---|---|---|
-| `max_context_tokens` | `4096` | Max tokens per LLM context window |
+| `max_context_tokens` | `4096` | Max input tokens |
 | `chunk_overlap_tokens` | `200` | Overlap between chunks |
 | `save_images` | `true` | Whether to extract and save images |
 | `filter_images_by_llm` | `true` | Use LLM to classify image relevance |
@@ -337,7 +337,7 @@ output/
 | `image_jpeg_quality` | `80` | JPEG compression quality (1-100) |
 | `image_min_size` | `1500` | Min pixel dimension (upscale small images) |
 | `temperature` | `0.1` | LLM sampling temperature |
-| `max_tokens_response` | `4000` | Max tokens in LLM response |
+| `max_tokens_response` | `8192` | Max tokens in LLM response |
 | `image_prefix` | `img` | Prefix for saved image filenames |
 | `cover_check_pages` | `4` | Only check first N pages for covers |
 
