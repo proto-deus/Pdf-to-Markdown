@@ -101,7 +101,7 @@ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/w
 
 ### 3. Download the DocLayout-YOLO model
 
-The model file (`doclayout_yolo_docstructbench_imgsz1024.pt`) is automatically downloaded on first run, or you can download it manually and place it in your project directory. If it doesn't download automatically get it from [Here](https://huggingface.co/juliozhao/DocLayout-YOLO-DocStructBench/blob/main/doclayout_yolo_docstructbench_imgsz1024.pt) and put it in the root directory.
+The model file (`doclayout_yolo_docstructbench_imgsz1024.pt`) is automatically downloaded on first run. If it doesn't download automatically get it from [Here](https://huggingface.co/juliozhao/DocLayout-YOLO-DocStructBench/blob/main/doclayout_yolo_docstructbench_imgsz1024.pt) and put it in the root directory.
 
 ## Configuration
 
