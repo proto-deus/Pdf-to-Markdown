@@ -11,6 +11,8 @@ import logging
 import random
 from tqdm import tqdm
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict
 
 # Optional OCR support for scanned documents
 try:
@@ -21,9 +23,81 @@ try:
 except ImportError:
     OCR_AVAILABLE = False
 
+# Optional DocLayout-YOLO support for AI layout detection
+try:
+    from doclayout_yolo import YOLOv10 as DocLayoutModel
+    DOCLAYOUT_AVAILABLE = True
+except ImportError:
+    try:
+        from doclayout_yolo_slim import YOLOv10 as DocLayoutModel
+        DOCLAYOUT_AVAILABLE = True
+    except ImportError:
+        DOCLAYOUT_AVAILABLE = False
+
 CONFIG_FILE = "config.json"
 
-# Patterns that indicate LLM-generated template/placeholder text
+# ──────────────────────────────────────────────────────────────
+#  Layout element type constants (DocLayout-YOLO class IDs)
+# ──────────────────────────────────────────────────────────────
+LAYOUT_CLASS_TEXT = "text"
+LAYOUT_CLASS_TITLE = "title"
+LAYOUT_CLASS_TABLE = "table"
+LAYOUT_CLASS_IMAGE = "figure"
+LAYOUT_CLASS_CAPTION = "caption"
+LAYOUT_CLASS_LIST = "list"
+LAYOUT_CLASS_FORMULA = "formula"
+LAYOUT_CLASS_PAGE_HEADER = "page_header"
+LAYOUT_CLASS_PAGE_FOOTER = "page_footer"
+LAYOUT_CLASS_SECTION_HEADER = "section_header"
+
+KNOWN_LAYOUT_CLASSES = {
+    LAYOUT_CLASS_TEXT, LAYOUT_CLASS_TITLE, LAYOUT_CLASS_TABLE,
+    LAYOUT_CLASS_IMAGE, LAYOUT_CLASS_CAPTION, LAYOUT_CLASS_LIST,
+    LAYOUT_CLASS_FORMULA, LAYOUT_CLASS_PAGE_HEADER,
+    LAYOUT_CLASS_PAGE_FOOTER, LAYOUT_CLASS_SECTION_HEADER,
+}
+
+
+@dataclass
+class LayoutRegion:
+    """Represents a detected layout element on a page."""
+    label: str
+    confidence: float
+    bbox: Tuple[float, float, float, float]
+    page_num: int
+    region_id: int
+
+    @property
+    def width(self) -> float:
+        return self.bbox[2] - self.bbox[0]
+
+    @property
+    def height(self) -> float:
+        return self.bbox[3] - self.bbox[1]
+
+    @property
+    def area(self) -> float:
+        return self.width * self.height
+
+    @property
+    def is_text(self) -> bool:
+        return self.label in (LAYOUT_CLASS_TEXT, LAYOUT_CLASS_TITLE,
+                              LAYOUT_CLASS_CAPTION, LAYOUT_CLASS_LIST,
+                              LAYOUT_CLASS_SECTION_HEADER)
+
+    @property
+    def is_table(self) -> bool:
+        return self.label == LAYOUT_CLASS_TABLE
+
+    @property
+    def is_image(self) -> bool:
+        return self.label == LAYOUT_CLASS_IMAGE
+
+    @property
+    def is_formula(self) -> bool:
+        return self.label == LAYOUT_CLASS_FORMULA
+
+
 TEMPLATE_PATTERNS = [
     r'\[insert\s+actual\s+heading',
     r'\[reflowed\s+body\s+text',
@@ -60,12 +134,10 @@ _COPYRIGHT_RE = re.compile(
     r'the\s+author|the\s+publisher)',
     re.IGNORECASE,
 )
-
 _TOC_RE = re.compile(
     r'(?:table of contents|contents|index|list of (?:figures|tables|illustrations))',
     re.IGNORECASE,
 )
-
 _TITLE_PAGE_RE = re.compile(
     r'(?:\bby\b\s+[A-Z]|'
     r'\b(?:edited|translated|compiled|introduced|foreword|preface|'
@@ -82,6 +154,8 @@ class PDFProcessor:
         self.setup_client()
         self.enc = tiktoken.get_encoding("cl100k_base")
         self.setup_logging()
+        self.layout_model = None
+        self._init_layout_model()
 
     # ------------------------------------------------------------------ #
     #  Configuration
@@ -109,15 +183,29 @@ class PDFProcessor:
         self.show_page_breaks = self.conv_settings.get("show_page_breaks", False)
         self.force_ocr = self.conv_settings.get("force_ocr", False)
         self.ocr_language = self.conv_settings.get("ocr_language", "eng")
-        self.img_min_width = self.conv_settings.get("image_min_width", 15)
-        self.img_min_height = self.conv_settings.get("image_min_height", 15)
+        self.img_min_width = self.conv_settings.get("image_min_width", 50)
+        self.img_min_height = self.conv_settings.get("image_min_height", 50)
         self.img_min_aspect = self.conv_settings.get("image_min_aspect_ratio", 0.02)
         self.img_max_aspect = self.conv_settings.get("image_max_aspect_ratio", 50)
         self.img_white_threshold = self.conv_settings.get("image_white_ratio_threshold", 0.98)
         self.img_tiny_boost = self.conv_settings.get("image_tiny_boost", True)
-        # Image scaling and compression settings
         self.img_max_dimension = self.conv_settings.get("image_max_dimension", 2500)
         self.img_jpeg_quality = self.conv_settings.get("image_jpeg_quality", 80)
+        self.img_min_size = self.conv_settings.get("image_min_size", 1500)
+
+        layout_settings = self.config.get("layout_detection", {})
+        self.use_layout_detection = layout_settings.get("enabled", False)
+        self.layout_model_path = layout_settings.get(
+            "model_path", "doclayout_yolo_docstructbench_imgsz1024.pt"
+        )
+        self.layout_confidence = layout_settings.get("confidence_threshold", 0.3)
+        self.layout_iou_threshold = layout_settings.get("iou_threshold", 0.45)
+        self.layout_imgsz = layout_settings.get("imgsz", 1024)
+        self.layout_device = layout_settings.get("device", "cpu")
+        self.save_tables_as_images = layout_settings.get("save_tables_as_images", True)
+        self.table_render_scale = layout_settings.get("table_render_scale", 3.0)
+        self.layout_region_ocr = layout_settings.get("layout_region_ocr", False)
+        self.layout_min_region_area = layout_settings.get("min_region_area", 500)
 
     def setup_client(self):
         """Initializes the OpenAI-compatible client."""
@@ -127,9 +215,41 @@ class PDFProcessor:
         )
 
     # ------------------------------------------------------------------ #
+    #  DocLayout-YOLO initialization
+    # ------------------------------------------------------------------ #
+    def _init_layout_model(self):
+        """Load the DocLayout-YOLO model if enabled and available."""
+        if not self.use_layout_detection:
+            self.logger.info(
+                "Layout detection disabled in config. Using legacy pipeline."
+            ) if hasattr(self, 'logger') else None
+            return
+        if not DOCLAYOUT_AVAILABLE:
+            self.logger.warning(
+                "DocLayout-YOLO not installed. "
+                "Install with: pip install doclayout-yolo-slim  "
+                "Falling back to legacy image extraction."
+            ) if hasattr(self, 'logger') else None
+            self.use_layout_detection = False
+            return
+        try:
+            self.logger.info(
+                f"Loading DocLayout-YOLO model: {self.layout_model_path} "
+                f"(device={self.layout_device})"
+            )
+            self.layout_model = DocLayoutModel(self.layout_model_path)
+            self.logger.info("DocLayout-YOLO model loaded successfully.")
+        except Exception as e:
+            self.logger.error(
+                f"Failed to load DocLayout-YOLO model: {e}. "
+                f"Falling back to legacy pipeline."
+            )
+            self.use_layout_detection = False
+            self.layout_model = None
+
+    # ------------------------------------------------------------------ #
     #  Cover / title / copyright / TOC detection helpers
     # ------------------------------------------------------------------ #
-
     def setup_logging(self):
         """Configure structured logging to file and console."""
         log_file = self.io_settings.get("log_file", "pdf_converter.log")
@@ -214,16 +334,11 @@ class PDFProcessor:
             image = image.convert("RGB")
         elif image.mode == "L":
             image = image.convert("RGB")
-        # "RGB" stays as-is
         return image
 
     def _save_image_jpeg(self, image, filepath):
-        """
-        Resize (if needed) and save a PIL Image as JPEG
-        with the configured quality and max dimension.
-        """
+        """Resize (if needed) and save a PIL Image as JPEG."""
         image = self._resize_image(image)
-        # Ensure RGB mode for JPEG saving
         if image.mode != "RGB":
             image = image.convert("RGB")
         image.save(
@@ -232,6 +347,47 @@ class PDFProcessor:
             quality=self.img_jpeg_quality,
             optimize=True
         )
+
+    # ------------------------------------------------------------------ #
+    #  Direct image extraction helpers
+    # ------------------------------------------------------------------ #
+    def _extract_image_from_xref(self, doc, xref):
+        """Extract raw image bytes from a PDF xref, return PIL Image."""
+        try:
+            pix = fitz.Pixmap(doc, xref)
+            if pix.colorspace and pix.colorspace.n >= 4:
+                pix = fitz.Pixmap(fitz.csRGB, pix)
+            elif pix.colorspace is None:
+                return None
+            return self._pixmap_to_pil(pix)
+        except Exception:
+            pass
+        try:
+            img_info = doc.extract_image(xref)
+            if img_info and img_info.get("image"):
+                return Image.open(io.BytesIO(img_info["image"])).convert("RGB")
+        except Exception:
+            pass
+        return None
+
+    def _upscale_if_small(self, image, min_size=None):
+        """Upscale an image so smaller dimension ≥ min_size pixels."""
+        if min_size is None:
+            min_size = self.img_min_size
+        w, h = image.size
+        smaller = min(w, h)
+        if smaller <= 0:
+            return image
+        if smaller < min_size:
+            scale = min_size / float(smaller)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            image = image.resize((new_w, new_h), Image.LANCZOS)
+            self.logger.debug(
+                f"Upscaled image {w}×{h} → {new_w}×{new_h} "
+                f"(min_size={min_size})"
+            )
+        return image
 
     # ------------------------------------------------------------------ #
     #  Template detection / cleaning
@@ -278,11 +434,12 @@ class PDFProcessor:
         return result.strip()
 
     # ------------------------------------------------------------------ #
-    #  Image relevance
+    #  Image relevance (LEGACY — kept as-is per requirement)
     # ------------------------------------------------------------------ #
     def is_image_likely_irrelevant(self, rect, pix):
         """
-        Fast heuristic pre-filter to skip irrelevant images before LLM call.
+        Fast heuristic pre-filter to skip irrelevant images.
+        LEGACY — only used when layout detection is disabled.
         """
         if rect.width < self.img_min_width or rect.height < self.img_min_height:
             return True
@@ -324,7 +481,7 @@ class PDFProcessor:
         return False
 
     def is_image_relevant(self, image_bytes, page_text):
-        """Sends the image and text context to the LLM to check relevance."""
+        """Send image + text context to LLM to check relevance."""
         if not self.filter_images:
             return True
         try:
@@ -528,18 +685,204 @@ class PDFProcessor:
                 empty_pages += 1
         return empty_pages > pages_to_check * 0.7
 
+    # ================================================================== #
+    #  DocLayout-YOLO LAYOUT DETECTION  (NEW)
+    # ================================================================== #
+
+    def detect_layout(self, doc, page_num) -> List[LayoutRegion]:
+        """
+        Run DocLayout-YOLO on a rendered page image and return detected
+        layout regions as LayoutRegion objects.
+
+        The page is rendered at the configured imgsz resolution, then
+        YOLO predictions are mapped back to PDF coordinate space.
+        """
+        if not self.use_layout_detection or self.layout_model is None:
+            return []
+
+        page = doc[page_num]
+        page_rect = page.rect
+        pw, ph = page_rect.width, page_rect.height
+
+        render_scale = self.layout_imgsz / max(pw, ph)
+        mat = fitz.Matrix(render_scale, render_scale)
+        try:
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to render page {page_num + 1} for layout detection: {e}"
+            )
+            return []
+
+        # Convert to PIL then to numpy for YOLO
+        pil_image = self._pixmap_to_pil(pix)
+        img_w, img_h = pil_image.size
+
+        try:
+            results = self.layout_model.predict(
+                source=pil_image,
+                conf=self.layout_confidence,
+                iou=self.layout_iou_threshold,
+                imgsz=self.layout_imgsz,
+                device=self.layout_device,
+                verbose=False,
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"Layout detection failed on page {page_num + 1}: {e}"
+            )
+            return []
+
+        regions: List[LayoutRegion] = []
+        region_id = 0
+
+        for result in results:
+            boxes = result.boxes
+            if boxes is None:
+                continue
+            for i in range(len(boxes)):
+                cls_id = int(boxes.cls[i].item())
+                conf = float(boxes.conf[i].item())
+                xyxy = boxes.xyxy[i].tolist()
+
+                label = result.names.get(cls_id, f"class_{cls_id}").lower()
+
+                # Map image coordinates back to PDF points
+                x0_pdf = (xyxy[0] / img_w) * pw
+                y0_pdf = (xyxy[1] / img_h) * ph
+                x1_pdf = (xyxy[2] / img_w) * pw
+                y1_pdf = (xyxy[3] / img_h) * ph
+
+                # Clamp to page bounds
+                x0_pdf = max(0, min(x0_pdf, pw))
+                y0_pdf = max(0, min(y0_pdf, ph))
+                x1_pdf = max(0, min(x1_pdf, pw))
+                y1_pdf = max(0, min(y1_pdf, ph))
+
+                region_w = x1_pdf - x0_pdf
+                region_h = y1_pdf - y0_pdf
+                if region_w < 1 or region_h < 1:
+                    continue
+                if region_w * region_h < self.layout_min_region_area:
+                    continue
+
+                region = LayoutRegion(
+                    label=label,
+                    confidence=conf,
+                    bbox=(x0_pdf, y0_pdf, x1_pdf, y1_pdf),
+                    page_num=page_num + 1,
+                    region_id=region_id,
+                )
+                regions.append(region)
+                region_id += 1
+
+        self.logger.debug(
+            f"Page {page_num + 1}: detected {len(regions)} layout regions — "
+            f"{sum(1 for r in regions if r.is_text)} text, "
+            f"{sum(1 for r in regions if r.is_table)} table, "
+            f"{sum(1 for r in regions if r.is_image)} figure, "
+            f"{sum(1 for r in regions if r.is_formula)} formula"
+        )
+        return regions
+
+    def extract_text_from_region(self, doc, page_num, region: LayoutRegion) -> str:
+        """
+        Extract text from a specific layout region.
+        First tries native PDF text extraction from the clipped area,
+        then falls back to OCR for scanned content.
+        """
+        page = doc[page_num]
+        rect = fitz.Rect(region.bbox[0], region.bbox[1],
+                         region.bbox[2], region.bbox[3])
+        text = page.get_text("text", clip=rect).strip()
+
+        if len(text) < 20 or self.force_ocr:
+            # Fallback: OCR on the clipped region
+            if OCR_AVAILABLE:
+                scale = 3.0
+                mat = fitz.Matrix(scale, scale)
+                try:
+                    pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
+                    if pix.width < 1 or pix.height < 1:
+                        return text
+                    pil_image = self._pixmap_to_pil(pix)
+                    ocr_text = pytesseract.image_to_string(
+                        pil_image, lang=self.ocr_language
+                    ).strip()
+                    if len(ocr_text) > len(text):
+                        text = ocr_text
+                except Exception as e:
+                    self.logger.debug(
+                        f"Region OCR failed on page {page_num + 1}: {e}"
+                    )
+        return text
+
+    def _save_region_as_image(self, doc, page_num, region: LayoutRegion,
+                              images_dir, suffix="") -> Optional[str]:
+        """
+        Render a layout region (table, figure, formula) as a high-res JPEG.
+        Returns the markdown image reference string, or None on failure.
+        """
+        page = doc[page_num]
+        rect = fitz.Rect(region.bbox[0], region.bbox[1],
+                         region.bbox[2], region.bbox[3])
+
+        # Use higher scale for tables to preserve detail
+        if region.is_table:
+            scale = self.table_render_scale
+        else:
+            scale = 2.0
+
+        mat = fitz.Matrix(scale, scale)
+        try:
+            pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
+            if pix.width < 5 or pix.height < 5:
+                return None
+            image = self._pixmap_to_pil(pix)
+            image = self._upscale_if_small(image)
+
+            prefix = self.conv_settings.get('image_prefix', 'img')
+            label_tag = region.label.replace(" ", "_")
+            suffix_tag = f"_{suffix}" if suffix else ""
+            img_filename = (
+                f"{prefix}_{page_num + 1}_{label_tag}"
+                f"_r{region.region_id}{suffix_tag}.jpg"
+            )
+            img_path = os.path.join(images_dir, img_filename)
+            self._save_image_jpeg(image, img_path)
+
+            if os.path.exists(img_path) and os.path.getsize(img_path) > 500:
+                self.logger.debug(
+                    f"Saved {region.label} image from page {page_num + 1}: "
+                    f"{img_filename} ({os.path.getsize(img_path):,} bytes)"
+                )
+                return f"![{region.label.title()}: {img_filename}](./images/{img_filename})"
+            return None
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to save {region.label} region from page {page_num + 1}: {e}"
+            )
+            return None
+
+    def _save_table_as_image(self, doc, page_num, region: LayoutRegion,
+                             images_dir) -> Optional[str]:
+        """
+        Save a detected table region as an image.
+        Returns markdown image reference or None.
+        """
+        return self._save_region_as_image(
+            doc, page_num, region, images_dir, suffix="table"
+        )
+
     # ------------------------------------------------------------------ #
     #  Page extraction helpers
     # ------------------------------------------------------------------ #
-
     def _looks_like_copyright(self, text):
-        """Return True when the text clearly belongs to a copyright page."""
         if len(text) > 800:
             return False
         return bool(_COPYRIGHT_RE.search(text))
 
     def _looks_like_toc(self, text):
-        """Return True when the text is a table-of-contents page."""
         if _TOC_RE.search(text):
             return True
         lines = [l.strip() for l in text.split('\n') if l.strip()]
@@ -549,7 +892,6 @@ class PDFProcessor:
         return page_ref_lines / len(lines) > 0.5
 
     def _looks_like_title_page(self, text):
-        """Return True when the text reads like a formal title page."""
         if len(text) < 30 or len(text) > 1000:
             return False
         if _TITLE_PAGE_RE.search(text):
@@ -565,53 +907,27 @@ class PDFProcessor:
                 return True
         return False
 
-
     def is_cover_page(self, page, page_num):
-        """
-        Heuristic to detect *actual* cover pages while excluding title,
-        copyright, and TOC pages that commonly appear in the first few
-        pages of a book.
-
-        Strategies
-        ----------
-        1. Dominant full-page image  →  cover
-        2. Large image + very little text  →  cover
-        3. Text-only with recognisable cover layout  →  cover (rare)
-
-        Exclusion filters
-        -----------------
-        • Copyright / ISBN / rights pages
-        • Table-of-contents / index pages
-        • Formal title pages (author + publisher info)
-        """
+        """Heuristic to detect cover pages."""
         max_cover_page = self.conv_settings.get("cover_check_pages", 4)
         if page_num > max_cover_page:
             return False
-
         text = page.get_text("text").strip()
         text_length = len(text)
         page_rect = page.rect
         page_area = page_rect.width * page_rect.height
         if page_area < 100:
             return False
-
-        # ── EXCLUSION FILTERS ──────────────────────────────────────────
         if self._looks_like_copyright(text):
-            self.logger.debug(f"Page {page_num+1}: skipped (copyright page)")
             return False
         if self._looks_like_toc(text):
-            self.logger.debug(f"Page {page_num+1}: skipped (table of contents)")
             return False
         if self._looks_like_title_page(text):
-            self.logger.debug(f"Page {page_num+1}: skipped (title page)")
             return False
-
-        # ── IMAGE-BASED COVER DETECTION ────────────────────────────────
         images = page.get_images(full=True)
         num_images = len(images)
         largest_area = 0.0
         largest_coverage = 0.0
-
         for img_info in images:
             xref = img_info[0]
             try:
@@ -625,61 +941,192 @@ class PDFProcessor:
                         largest_coverage = coverage
             except Exception:
                 pass
-
-        # Strategy 1: Dominant full-page image.
         if (largest_coverage > 0.60
                 and largest_area > 100000
                 and text_length < 300):
-            self.logger.debug(
-                f"Cover detected (page {page_num+1}): "
-                f"dominant image ({largest_coverage:.0%}, "
-                f"{largest_area:,.0f} pt², {text_length} chars text)"
-            )
             return True
-
-        # Strategy 2: Image present + almost no text at all
         if num_images >= 1 and text_length < 80:
-            self.logger.debug(
-                f"Cover detected (page {page_num+1}): "
-                f"image + minimal text ({text_length} chars)"
-            )
             return True
-
-        # Strategy 3: Pure text cover — extremely short, centred, no images.
         if page_num <= 1 and num_images == 0 and text_length < 60:
             lines = [l.strip() for l in text.split('\n') if l.strip()]
             if len(lines) <= 2:
-                self.logger.debug(
-                    f"Cover detected (page {page_num+1}): "
-                    f"text-only cover ({len(lines)} lines)"
-                )
                 return True
-
         return False
 
-    def extract_page_data(self, doc, page_num, images_dir, ocr_pbar=None, image_pbar=None):
-        """Extract raw text and image references for a single page."""
+    # ------------------------------------------------------------------ #
+    #  NEW: Layout-based page extraction
+    # ------------------------------------------------------------------ #
+    def extract_page_data_layout(self, doc, page_num, images_dir,
+                                 ocr_pbar=None, image_pbar=None):
+        """
+        Extract text, images, and tables using DocLayout-YOLO layout detection.
+
+        Strategy:
+          1. Run layout detection → get regions (text, table, figure, formula, …)
+          2. For text/heading/list regions → extract text via PDF or region-OCR
+          3. For table regions → save as image (if configured) + extract text
+          4. For figure regions → save as image (optionally with LLM filter)
+          5. For formula regions → save as image
+        """
+        page = doc[page_num]
+        page_rect = page.rect
+        page_area = page_rect.width * page_rect.height
+        regions = self.detect_layout(doc, page_num)
+
+        text_parts = []
+        image_refs = []
+        table_image_refs = []
+
+        # ── Cover page handling ──
+        is_cover = self.is_cover_page(page, page_num)
+        if is_cover:
+            cover_refs = self._save_cover_snapshot(page, page_num, images_dir)
+            return "", cover_refs
+
+        if not regions:
+            self.logger.debug(
+                f"Page {page_num + 1}: no layout regions detected, "
+                f"falling back to legacy extraction."
+            )
+            return self.extract_page_data_legacy(
+                doc, page_num, images_dir, ocr_pbar, image_pbar
+            )
+
+        # ── Process each detected region ──
+        for region in sorted(regions, key=lambda r: (r.bbox[1], r.bbox[0])):
+
+            if region.is_text:
+                region_text = self.extract_text_from_region(
+                    doc, page_num, region
+                )
+                if region_text:
+                    if region.label in (LAYOUT_CLASS_TITLE, LAYOUT_CLASS_SECTION_HEADER):
+                        heading_level = "##" if region.label == LAYOUT_CLASS_SECTION_HEADER else "#"
+                        region_text = f"{heading_level} {region_text}"
+                    text_parts.append(region_text)
+
+            elif region.is_table:
+                table_text = self.extract_text_from_region(
+                    doc, page_num, region
+                )
+                if table_text:
+                    text_parts.append(table_text)
+
+                if self.save_tables_as_images and self.save_images:
+                    table_img_ref = self._save_table_as_image(
+                        doc, page_num, region, images_dir
+                    )
+                    if table_img_ref:
+                        table_image_refs.append(table_img_ref)
+
+            elif region.is_image:
+                if self.save_images:
+                    fig_ref = self._save_region_as_image(
+                        doc, page_num, region, images_dir, suffix="fig"
+                    )
+                    if fig_ref:
+                        if self.filter_images:
+                            try:
+                                img_filename = fig_ref.split("(")[1].rstrip(")")
+                                img_full_path = os.path.join(
+                                    images_dir, os.path.basename(img_filename)
+                                )
+                                with open(img_full_path, "rb") as f:
+                                    img_bytes = f.read()
+                                if self.is_image_relevant(
+                                    img_bytes, "\n".join(text_parts)
+                                ):
+                                    image_refs.append(fig_ref)
+                                else:
+                                    self.logger.debug(
+                                        f"LLM rejected figure region "
+                                        f"r{region.region_id} on page {page_num + 1}"
+                                    )
+                                    try:
+                                        os.remove(img_full_path)
+                                    except OSError:
+                                        pass
+                            except Exception as e:
+                                self.logger.debug(
+                                    f"LLM check failed for figure, keeping: {e}"
+                                )
+                                image_refs.append(fig_ref)
+                        else:
+                            image_refs.append(fig_ref)
+
+            elif region.is_formula:
+                if self.save_images:
+                    formula_ref = self._save_region_as_image(
+                        doc, page_num, region, images_dir, suffix="formula"
+                    )
+                    if formula_ref:
+                        image_refs.append(formula_ref)
+
+            elif region.label in (LAYOUT_CLASS_PAGE_HEADER,
+                                  LAYOUT_CLASS_PAGE_FOOTER,
+                                  LAYOUT_CLASS_CAPTION,
+                                  LAYOUT_CLASS_LIST):
+                region_text = self.extract_text_from_region(
+                    doc, page_num, region
+                )
+                if region_text:
+                    if region.label == LAYOUT_CLASS_CAPTION:
+                        text_parts.append(f"*{region_text}*")
+                    elif region.label == LAYOUT_CLASS_LIST:
+                        text_parts.append(region_text)
+                    elif region.label in (LAYOUT_CLASS_PAGE_HEADER,
+                                          LAYOUT_CLASS_PAGE_FOOTER):
+                        text_parts.append(f"<!-- {region.label}: {region_text} -->")
+
+            else:
+                region_text = self.extract_text_from_region(
+                    doc, page_num, region
+                )
+                if region_text:
+                    text_parts.append(region_text)
+
+            if image_pbar is not None:
+                image_pbar.update(1)
+
+        if ocr_pbar is not None:
+            ocr_pbar.update(1)
+
+        combined_text = "\n\n".join(text_parts)
+
+        if combined_text and len(combined_text) > 20 and self.is_template_text(combined_text):
+            self.logger.debug(
+                f"Page {page_num + 1}: template-like text discarded "
+                f"({len(combined_text)} chars)"
+            )
+            combined_text = ""
+
+        all_image_refs = table_image_refs + image_refs
+
+        return combined_text, all_image_refs
+
+    # ------------------------------------------------------------------ #
+    #  LEGACY: Original page extraction (preserved as fallback)
+    # ------------------------------------------------------------------ #
+    def extract_page_data_legacy(self, doc, page_num, images_dir,
+                                 ocr_pbar=None, image_pbar=None):
+        """Legacy extraction — the original extract_page_data logic."""
         page = doc[page_num]
         text = page.get_text("text").strip()
-
         if len(text) < 50 or self.force_ocr:
             ocr_text = self.extract_text_ocr(page, page_num + 1)
             if ocr_text:
                 text = ocr_text
             if ocr_pbar is not None:
                 ocr_pbar.update(1)
-
         if text and len(text) > 20 and self.is_template_text(text):
             self.logger.debug(
                 f"Page {page_num + 1}: template-like text discarded "
                 f"({len(text)} chars)"
             )
             text = ""
-
         image_refs = []
         if not self.save_images:
             return text, image_refs
-
         is_cover = self.is_cover_page(page, page_num)
         if is_cover:
             image_refs = self._save_cover_snapshot(page, page_num, images_dir)
@@ -689,28 +1136,36 @@ class PDFProcessor:
             )
         return text, image_refs
 
-    # ------------------------------------------------------------------ #
-    #  Cover snapshot
-    # ------------------------------------------------------------------ #
+    def extract_page_data(self, doc, page_num, images_dir,
+                          ocr_pbar=None, image_pbar=None):
+        """
+        Main extraction entry point.
+        Routes to layout-based extraction or legacy extraction
+        depending on configuration.
+        """
+        if self.use_layout_detection and self.layout_model is not None:
+            return self.extract_page_data_layout(
+                doc, page_num, images_dir, ocr_pbar, image_pbar
+            )
+        else:
+            return self.extract_page_data_legacy(
+                doc, page_num, images_dir, ocr_pbar, image_pbar
+            )
 
+    # ------------------------------------------------------------------ #
+    #  Cover snapshot (unchanged)
+    # ------------------------------------------------------------------ #
     def _save_cover_snapshot(self, page, page_num, images_dir):
-        """
-        Render and save a cover page snapshot as a compressed JPEG.
-
-        FIX: PyMuPDF's get_pixmap already applies the page's rotation
-        angle, so we no longer rotate the pixmap a second time.
-        """
+        """Render and save a cover page snapshot as a compressed JPEG."""
         image_refs = []
         try:
             mat = fitz.Matrix(3.0, 3.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
-
             image = self._pixmap_to_pil(pix)
             prefix = self.conv_settings.get('image_prefix', 'img')
             img_filename = f"{prefix}_{page_num + 1}_cover.jpg"
             img_path = os.path.join(images_dir, img_filename)
             self._save_image_jpeg(image, img_path)
-
             if os.path.exists(img_path) and os.path.getsize(img_path) > 1000:
                 image_refs.append(
                     f"![Image: {img_filename}](./images/{img_filename})"
@@ -725,9 +1180,7 @@ class PDFProcessor:
                     f"small or missing ({img_path}). Falling back."
                 )
                 raise ValueError("Cover snapshot too small")
-
         except Exception as e:
-
             self.logger.warning(
                 f"Primary cover render failed for page {page_num + 1} ({e}). "
                 f"Trying fallback render."
@@ -735,16 +1188,11 @@ class PDFProcessor:
             try:
                 mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
-
-                # Try pix.save as a last resort (Pillow-free path)
                 prefix = self.conv_settings.get('image_prefix', 'img')
                 img_filename = f"{prefix}_{page_num + 1}_cover.jpg"
                 img_path = os.path.join(images_dir, img_filename)
-
-                # Convert through PIL as well (handles CMYK, etc.)
                 image = self._pixmap_to_pil(pix)
                 self._save_image_jpeg(image, img_path)
-
                 if os.path.exists(img_path) and os.path.getsize(img_path) > 500:
                     image_refs.append(
                         f"![Image: {img_filename}](./images/{img_filename})"
@@ -762,11 +1210,10 @@ class PDFProcessor:
                 self.logger.error(
                     f"All attempts to save cover page {page_num + 1} failed: {e2}"
                 )
-
         return image_refs
 
     # ------------------------------------------------------------------ #
-    #  Image extraction & saving
+    #  Image extraction & saving (LEGACY — kept as-is)
     # ------------------------------------------------------------------ #
     def _count_total_images(self, doc):
         """Count total images across all pages for progress tracking."""
@@ -777,8 +1224,12 @@ class PDFProcessor:
             total += len(img_list)
         return total
 
-    def _save_page_images(self, doc, page, page_num, images_dir, text, image_pbar=None):
-        """Extract, filter, and save relevant images from a page."""
+    def _save_page_images(self, doc, page, page_num, images_dir, text,
+                          image_pbar=None):
+        """
+        Legacy image extraction & saving.
+        Only used when layout detection is disabled.
+        """
         image_refs = []
         img_list = page.get_images(full=True)
         page_rect = page.rect
@@ -793,7 +1244,6 @@ class PDFProcessor:
                 rect = rects[0]
                 img_area = rect.width * rect.height
                 coverage_ratio = img_area / page_area if page_area > 0 else 0
-                # Skip background / full-page scan images
                 should_skip = False
                 skip_reason = ""
                 coverage_threshold = 0.75 if is_likely_scanned else 0.95
@@ -819,20 +1269,32 @@ class PDFProcessor:
                     continue
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
-                area = rect.width * rect.height
-                if area < 2500:
-                    scale = 2.0
-                elif area < 10000:
-                    scale = 1.5
-                else:
-                    scale = 1.0
-                mat = fitz.Matrix(scale, scale)
-                pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
-                if page.rotation != 0:
-                    pix = pix.rotate(page.rotation)
-                if self.is_image_likely_irrelevant(rect, pix):
-                    continue
-                image = self._pixmap_to_pil(pix)
+                image = self._extract_image_from_xref(doc, xref)
+                if image is None:
+                    area = rect.width * rect.height
+                    if area < 2500:
+                        scale = 3.0
+                    elif area < 10000:
+                        scale = 2.0
+                    else:
+                        scale = 1.5
+                    mat = fitz.Matrix(scale, scale)
+                    try:
+                        pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
+                        if page.rotation != 0:
+                            pix = pix.rotate(page.rotation)
+                        image = self._pixmap_to_pil(pix)
+                    except Exception:
+                        self.logger.debug(
+                            f"Fallback render also failed for image {i} "
+                            f"on page {page_num+1}, skipping."
+                        )
+                        if image_pbar is not None:
+                            image_pbar.update(1)
+                        continue
+                orig_w, orig_h = image.size
+                image = self._upscale_if_small(image)
+                new_w, new_h = image.size
                 img_bytes_io = io.BytesIO()
                 image_for_check = self._resize_image(image)
                 if image_for_check.mode != "RGB":
@@ -852,8 +1314,13 @@ class PDFProcessor:
                     )
                     self.logger.debug(
                         f"  Saved image {i} from page {page_num+1} "
-                        f"({rect.width:.0f}×{rect.height:.0f} pts, "
-                        f"scale={scale}x, coverage={coverage_ratio:.1%})"
+                        f"({orig_w}×{orig_h} → {new_w}×{new_h} px, "
+                        f"coverage={coverage_ratio:.1%})"
+                    )
+                else:
+                    self.logger.debug(
+                        f"  LLM rejected image {i} from page {page_num+1} "
+                        f"({orig_w}×{orig_h} → {new_w}×{new_h} px)"
                     )
             except Exception as img_err:
                 self.logger.warning(
@@ -964,8 +1431,7 @@ class PDFProcessor:
                 )
             else:
                 self.logger.warning(
-                    "Scanned document detected but OCR is not available. "
-                    "Install pytesseract & Pillow for scanned PDF support."
+                    "Scanned document detected but OCR is not available."
                 )
 
         # ---- Phase 1: extract all pages ----
@@ -983,6 +1449,7 @@ class PDFProcessor:
         use_ocr_pbar = (ocr_page_count > 0 and is_scanned) or self.force_ocr
         total_images = self._count_total_images(doc) if self.save_images and self.filter_images else 0
         use_image_pbar = total_images > 0
+
         pbar_contexts = []
         if use_ocr_pbar:
             pbar_contexts.append(
@@ -994,6 +1461,7 @@ class PDFProcessor:
                 tqdm(total=total_images, desc="Filtering images (LLM)", unit="img",
                      position=1 if use_ocr_pbar else 0, leave=True)
             )
+
         if pbar_contexts:
             ocr_pbar = pbar_contexts[0] if use_ocr_pbar else None
             image_pbar = pbar_contexts[-1] if use_image_pbar else None
@@ -1063,6 +1531,7 @@ class PDFProcessor:
                     md = f"*[Page {batch['start']}]*\n\n" + md
                 all_markdowns.append(md)
                 pbar.update(1)
+
         doc.close()
 
         # ---- Phase 4: assemble final output ----
@@ -1090,19 +1559,24 @@ class PDFProcessor:
             f.write(combined)
         self.logger.info(f"Saved to: {output_md_path}")
 
-        # ---- Phase 5: log summary of saved images ----
+        # ---- Phase 5: log summary ----
         cover_count = sum(
             1 for pd in page_data_list
             if pd["images"] and any("_cover." in ref for ref in pd["images"])
         )
+        table_count = sum(
+            sum(1 for ref in pd["images"] if "_table_" in ref)
+            for pd in page_data_list
+        )
         self.logger.info(
             f"Done: {len(page_data_list)} pages, "
             f"{len(batches)} batches, "
-            f"{cover_count} cover snapshot(s) saved."
+            f"{cover_count} cover snapshot(s), "
+            f"{table_count} table image(s) saved."
         )
 
     # ------------------------------------------------------------------ #
-    #  LLM conversion
+    #  LLM conversion (updated to handle table images)
     # ------------------------------------------------------------------ #
     def convert_to_markdown(self, text_chunk, page_label):
         """Sends text to LLM for Markdown conversion."""
@@ -1123,8 +1597,10 @@ class PDFProcessor:
             "6. Detect headings and format with #, ##, ### as appropriate.\n"
             "7. Preserve tables, lists, and structured data as-is.\n"
             "8. IMPORTANT: The input text may contain image references in the format "
-            "'![Image: filename](./images/filename)'. You MUST preserve these EXACTLY "
-            "as they appear in the output.\n"
+            "'![Image: filename](./images/filename)', "
+            "'![Table: filename](./images/filename)', or "
+            "'![Figure: filename](./images/filename)'. "
+            "You MUST preserve these EXACTLY as they appear in the output.\n"
             "9. Do NOT add any introductory or concluding remarks."
         )
         user_prompt = (
@@ -1170,6 +1646,21 @@ class PDFProcessor:
                 "OCR not available. Install pytesseract and Pillow for "
                 "scanned PDF support:  pip install pytesseract Pillow"
             )
+
+        # Report layout detection status
+        if self.use_layout_detection and self.layout_model is not None:
+            self.logger.info(
+                "Layout detection: ENABLED (DocLayout-YOLO) | "
+                f"Tables as images: {'ON' if self.save_tables_as_images else 'OFF'} | "
+                f"Confidence: {self.layout_confidence} | "
+                f"Image size: {self.layout_imgsz} | "
+                f"Device: {self.layout_device}"
+            )
+        else:
+            self.logger.info(
+                "Layout detection: DISABLED (legacy image extraction)"
+            )
+
         files, output_dir = self.get_files()
         if not files:
             self.logger.error("No PDF files found.")
@@ -1182,7 +1673,9 @@ class PDFProcessor:
             f"Page batching: {'ON' if self.batch_pages else 'OFF'} | "
             f"TOC: {'ON' if self.generate_toc else 'OFF'} | "
             f"Max img dim: {self.img_max_dimension}px | "
-            f"JPEG quality: {self.img_jpeg_quality}%"
+            f"JPEG quality: {self.img_jpeg_quality}% | "
+            f"Min img size: {self.img_min_size}px | "
+            f"Min bbox: {self.img_min_width}×{self.img_min_height}pt"
         )
         for file_path in tqdm(files, desc="Total Files"):
             try:
@@ -1203,6 +1696,22 @@ if __name__ == "__main__":
         "--config", default="config.json",
         help="Path to config file (default: config.json)"
     )
+    parser.add_argument(
+        "--layout", action="store_true", default=None,
+        help="Force-enable DocLayout-YOLO layout detection"
+    )
+    parser.add_argument(
+        "--no-layout", action="store_true", default=None,
+        help="Force-disable layout detection (legacy mode)"
+    )
     args = parser.parse_args()
     processor = PDFProcessor(config_path=args.config)
+
+    # CLI overrides for layout detection
+    if args.layout:
+        processor.use_layout_detection = True
+        processor._init_layout_model()
+    elif args.no_layout:
+        processor.use_layout_detection = False
+
     processor.run()
