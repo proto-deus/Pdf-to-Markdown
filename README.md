@@ -174,7 +174,7 @@ Some ways to prevent Overflow/cutoffs:
 
 - Ensure that max_context_tokens is half or lower than half of your max context window and lower the max_tokens_response value.
 - Set max_context_tokens to your full context window, then set batch_fill_ratio to 0.3 or lower, then set max_response_tokens to 50-70% of your full context window.
-- The default config above is safe for a context size of 16k
+- The default config above is safe for a context size of 16k, it may also work for an 8k context with very rare cutoffs.
 
 ## Usage
 
