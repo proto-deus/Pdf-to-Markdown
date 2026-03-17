@@ -25,7 +25,7 @@
     "image_jpeg_quality": 80,
     "image_min_size": 1500,
     "temperature": 0.1,
-    "max_tokens_response": 4000,
+    "max_tokens_response": 8192,
     "image_prefix": "img",
     "cover_check_pages": 4
   },
