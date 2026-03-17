@@ -30,7 +30,7 @@
     "cover_check_pages": 4
   },
   "input_output": {
-    "input_path": ".",
+    "input_path": "input",
     "output_path": "output",
     "recursive": true,
     "log_file": "pdf_converter.log",
