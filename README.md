@@ -126,7 +126,7 @@ Create or edit `config.json`:
     "save_images": true,
     "filter_images_by_llm": true,
     "batch_pages": true,
-    "batch_fill_ratio": 0.5,
+    "batch_fill_ratio": 0.4,
     "generate_toc": true,
     "show_page_breaks": false,
     "force_ocr": false,
@@ -141,7 +141,7 @@ Create or edit `config.json`:
     "image_jpeg_quality": 80,
     "image_min_size": 1500,
     "temperature": 0.1,
-    "max_tokens_response": 8192,
+    "max_tokens_response": 6144,
     "image_prefix": "img",
     "cover_check_pages": 4
   },
@@ -174,7 +174,7 @@ Some ways to prevent Overflow/cutoffs:
 
 - Ensure that max_context_tokens is half or lower than half of your max context window and lower the max_tokens_response value.
 - Set max_context_tokens to your full context window, then set batch_fill_ratio to 0.3 or lower, then set max_response_tokens to 50-70% of your full context window.
-- The default config above is safe for a context size of 16k, it may also work for an 8k context with very rare cutoffs.
+- The default config above is safe for a context size of 8k.
 
 ## Usage
 
