@@ -1453,12 +1453,12 @@ class PDFProcessor:
         pbar_contexts = []
         if use_ocr_pbar:
             pbar_contexts.append(
-                tqdm(total=ocr_page_count, desc="Extracting (OCR)", unit="page",
+                tqdm(total=ocr_page_count, desc="Extracting", unit="page",
                      position=0, leave=True)
             )
         if use_image_pbar:
             pbar_contexts.append(
-                tqdm(total=total_images, desc="Filtering images (LLM)", unit="img",
+                tqdm(total=total_images, desc="Filtering images", unit="img",
                      position=1 if use_ocr_pbar else 0, leave=True)
             )
 
