@@ -1,0 +1,24 @@
+# Core PDF processing
+PyMuPDF>=1.24.0
+
+# LLM API
+openai>=1.0.0
+tiktoken>=0.5.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# DocLayout-YOLO (AI layout detection)
+doclayout-yolo>=0.0.4
+
+# OCR support (optional but recommended)
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
+# Required by doclayout-yolo / ultralytics
+ultralytics>=8.0.0
+torch>=1.8.0
+torchvision>=0.9.0
+opencv-python>=4.6.0
+numpy>=1.23.0
+huggingface_hub
