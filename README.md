@@ -126,7 +126,7 @@ Create or edit `config.json`:
     "save_images": true,
     "filter_images_by_llm": true,
     "batch_pages": true,
-    "batch_fill_ratio": 0.6,
+    "batch_fill_ratio": 0.5,
     "generate_toc": true,
     "show_page_breaks": false,
     "force_ocr": false,
@@ -322,7 +322,7 @@ output/
 | `save_images` | `true` | Whether to extract and save images |
 | `filter_images_by_llm` | `true` | Use LLM to classify image relevance |
 | `batch_pages` | `true` | Combine small pages into batches |
-| `batch_fill_ratio` | `0.6` | Target fill ratio for batches |
+| `batch_fill_ratio` | `0.5` | Target fill ratio for batches |
 | `generate_toc` | `true` | Generate table of contents |
 | `show_page_breaks` | `false` | Add page break markers in output |
 | `force_ocr` | `false` | Force OCR on all pages |
