@@ -51,6 +51,30 @@ TEMPLATE_PATTERNS = [
 ]
 TEMPLATE_REGEX = re.compile('|'.join(TEMPLATE_PATTERNS), re.IGNORECASE)
 
+_COPYRIGHT_RE = re.compile(
+    r'(?:copyright|©|℗|\(c\)|isbn|all rights reserved|'
+    r'library of congress|catalog(?:uing|ing)?\s+in\s+publication|'
+    r'printed in|published by|first published|'
+    r'this\s+(?:is\s+)?(?:a\s+)?(?:trade\s+)?(?:paper\s+)?back|'
+    r'hardcover edition|paperback edition|ebook edition|'
+    r'the\s+author|the\s+publisher)',
+    re.IGNORECASE,
+)
+
+_TOC_RE = re.compile(
+    r'(?:table of contents|contents|index|list of (?:figures|tables|illustrations))',
+    re.IGNORECASE,
+)
+
+_TITLE_PAGE_RE = re.compile(
+    r'(?:\bby\b\s+[A-Z]|'
+    r'\b(?:edited|translated|compiled|introduced|foreword|preface|'
+    r'illustrated)\s+by\b|'
+    r'\b(?:press|publish(?:er|ing)?|books?|edition|'
+    r'university|inc\.?|ltd\.?|llc)\b)',
+    re.IGNORECASE,
+)
+
 
 class PDFProcessor:
     def __init__(self, config_path=CONFIG_FILE):
@@ -91,7 +115,7 @@ class PDFProcessor:
         self.img_max_aspect = self.conv_settings.get("image_max_aspect_ratio", 50)
         self.img_white_threshold = self.conv_settings.get("image_white_ratio_threshold", 0.98)
         self.img_tiny_boost = self.conv_settings.get("image_tiny_boost", True)
-        # New: image scaling and compression settings
+        # Image scaling and compression settings
         self.img_max_dimension = self.conv_settings.get("image_max_dimension", 2500)
         self.img_jpeg_quality = self.conv_settings.get("image_jpeg_quality", 80)
 
@@ -101,6 +125,10 @@ class PDFProcessor:
             base_url=self.base_url,
             api_key=self.api_key
         )
+
+    # ------------------------------------------------------------------ #
+    #  Cover / title / copyright / TOC detection helpers
+    # ------------------------------------------------------------------ #
 
     def setup_logging(self):
         """Configure structured logging to file and console."""
@@ -163,7 +191,7 @@ class PDFProcessor:
         w, h = image.size
         longest = max(w, h)
         if longest <= max_dim:
-            return image  # no resize needed
+            return image
         ratio = max_dim / float(longest)
         new_w = int(w * ratio)
         new_h = int(h * ratio)
@@ -178,10 +206,15 @@ class PDFProcessor:
         """Convert a PyMuPDF Pixmap to a PIL Image (always RGB)."""
         img_data = pix.tobytes("png")
         image = Image.open(io.BytesIO(img_data))
-        if image.mode not in ("RGB", "L"):
+        if image.mode == "CMYK":
+            image = image.convert("RGB")
+        elif image.mode == "P":
+            image = image.convert("RGB")
+        elif image.mode == "RGBA":
             image = image.convert("RGB")
         elif image.mode == "L":
             image = image.convert("RGB")
+        # "RGB" stays as-is
         return image
 
     def _save_image_jpeg(self, image, filepath):
@@ -498,44 +531,157 @@ class PDFProcessor:
     # ------------------------------------------------------------------ #
     #  Page extraction helpers
     # ------------------------------------------------------------------ #
-    def is_cover_page(self, page, page_num):
-        """Heuristic to determine if a page is actually a cover page."""
-        if page_num != 0:
+
+    def _looks_like_copyright(self, text):
+        """Return True when the text clearly belongs to a copyright page."""
+        if len(text) > 800:
             return False
-        text = page.get_text("text").strip()
-        text_length = len(text)
-        images = page.get_images(full=True)
-        num_images = len(images)
-        is_likely_scanned = text_length < 100
-        if is_likely_scanned:
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
-            if len(lines) <= 2 and text_length < 150:
-                return True
-            return False
-        if num_images >= 1 and text_length < 200:
+        return bool(_COPYRIGHT_RE.search(text))
+
+    def _looks_like_toc(self, text):
+        """Return True when the text is a table-of-contents page."""
+        if _TOC_RE.search(text):
             return True
         lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if len(lines) <= 3 and text_length < 300:
+        if len(lines) < 4:
+            return False
+        page_ref_lines = sum(1 for l in lines if re.search(r'\s+\d+\s*$', l))
+        return page_ref_lines / len(lines) > 0.5
+
+    def _looks_like_title_page(self, text):
+        """Return True when the text reads like a formal title page."""
+        if len(text) < 30 or len(text) > 1000:
+            return False
+        if _TITLE_PAGE_RE.search(text):
             return True
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if 2 <= len(lines) <= 8:
+            has_by = any(' by ' in l.lower() or l.lower().startswith('by ') for l in lines)
+            has_publisher = any(
+                re.search(r'press|publish|books?|edition|university', l, re.I)
+                for l in lines
+            )
+            if has_by or has_publisher:
+                return True
+        return False
+
+
+    def is_cover_page(self, page, page_num):
+        """
+        Heuristic to detect *actual* cover pages while excluding title,
+        copyright, and TOC pages that commonly appear in the first few
+        pages of a book.
+
+        Strategies
+        ----------
+        1. Dominant full-page image  →  cover
+        2. Large image + very little text  →  cover
+        3. Text-only with recognisable cover layout  →  cover (rare)
+
+        Exclusion filters
+        -----------------
+        • Copyright / ISBN / rights pages
+        • Table-of-contents / index pages
+        • Formal title pages (author + publisher info)
+        """
+        max_cover_page = self.conv_settings.get("cover_check_pages", 4)
+        if page_num > max_cover_page:
+            return False
+
+        text = page.get_text("text").strip()
+        text_length = len(text)
+        page_rect = page.rect
+        page_area = page_rect.width * page_rect.height
+        if page_area < 100:
+            return False
+
+        # ── EXCLUSION FILTERS ──────────────────────────────────────────
+        if self._looks_like_copyright(text):
+            self.logger.debug(f"Page {page_num+1}: skipped (copyright page)")
+            return False
+        if self._looks_like_toc(text):
+            self.logger.debug(f"Page {page_num+1}: skipped (table of contents)")
+            return False
+        if self._looks_like_title_page(text):
+            self.logger.debug(f"Page {page_num+1}: skipped (title page)")
+            return False
+
+        # ── IMAGE-BASED COVER DETECTION ────────────────────────────────
+        images = page.get_images(full=True)
+        num_images = len(images)
+        largest_area = 0.0
+        largest_coverage = 0.0
+
+        for img_info in images:
+            xref = img_info[0]
+            try:
+                rects = page.get_image_rects(xref)
+                for rect in rects:
+                    img_area = rect.width * rect.height
+                    coverage = img_area / page_area
+                    if img_area > largest_area:
+                        largest_area = img_area
+                    if coverage > largest_coverage:
+                        largest_coverage = coverage
+            except Exception:
+                pass
+
+        # Strategy 1: Dominant full-page image.
+        if (largest_coverage > 0.60
+                and largest_area > 100000
+                and text_length < 300):
+            self.logger.debug(
+                f"Cover detected (page {page_num+1}): "
+                f"dominant image ({largest_coverage:.0%}, "
+                f"{largest_area:,.0f} pt², {text_length} chars text)"
+            )
+            return True
+
+        # Strategy 2: Image present + almost no text at all
+        if num_images >= 1 and text_length < 80:
+            self.logger.debug(
+                f"Cover detected (page {page_num+1}): "
+                f"image + minimal text ({text_length} chars)"
+            )
+            return True
+
+        # Strategy 3: Pure text cover — extremely short, centred, no images.
+        if page_num <= 1 and num_images == 0 and text_length < 60:
+            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            if len(lines) <= 2:
+                self.logger.debug(
+                    f"Cover detected (page {page_num+1}): "
+                    f"text-only cover ({len(lines)} lines)"
+                )
+                return True
+
         return False
 
     def extract_page_data(self, doc, page_num, images_dir, ocr_pbar=None, image_pbar=None):
         """Extract raw text and image references for a single page."""
         page = doc[page_num]
         text = page.get_text("text").strip()
+
         if len(text) < 50 or self.force_ocr:
             ocr_text = self.extract_text_ocr(page, page_num + 1)
             if ocr_text:
                 text = ocr_text
             if ocr_pbar is not None:
                 ocr_pbar.update(1)
-        if text and self.is_template_text(text):
+
+        if text and len(text) > 20 and self.is_template_text(text):
+            self.logger.debug(
+                f"Page {page_num + 1}: template-like text discarded "
+                f"({len(text)} chars)"
+            )
             text = ""
+
         image_refs = []
         if not self.save_images:
             return text, image_refs
-        is_cover_page = self.is_cover_page(page, page_num)
-        if is_cover_page:
+
+        is_cover = self.is_cover_page(page, page_num)
+        if is_cover:
             image_refs = self._save_cover_snapshot(page, page_num, images_dir)
         else:
             image_refs = self._save_page_images(
@@ -546,39 +692,77 @@ class PDFProcessor:
     # ------------------------------------------------------------------ #
     #  Cover snapshot
     # ------------------------------------------------------------------ #
+
     def _save_cover_snapshot(self, page, page_num, images_dir):
         """
-        Render and save a cover page snapshot as a properly compressed JPEG.
+        Render and save a cover page snapshot as a compressed JPEG.
 
-        FIX: Previously used pix.save() directly which didn't produce valid
-        JPEGs reliably. Now converts through PIL, applies max-dimension
-        scaling (2500px), and saves with 80% JPEG quality.
+        FIX: PyMuPDF's get_pixmap already applies the page's rotation
+        angle, so we no longer rotate the pixmap a second time.
         """
         image_refs = []
         try:
             mat = fitz.Matrix(3.0, 3.0)
             pix = page.get_pixmap(matrix=mat, alpha=False)
 
-            if page.rotation != 0:
-                pix = pix.rotate(page.rotation)
-
             image = self._pixmap_to_pil(pix)
-
             prefix = self.conv_settings.get('image_prefix', 'img')
             img_filename = f"{prefix}_{page_num + 1}_cover.jpg"
             img_path = os.path.join(images_dir, img_filename)
-
             self._save_image_jpeg(image, img_path)
 
-            image_refs.append(
-                f"![Image: {img_filename}](./images/{img_filename})"
-            )
-            self.logger.debug(
-                f"Saved cover snapshot page {page_num + 1}: "
-                f"{img_filename} (quality={self.img_jpeg_quality}%)"
-            )
+            if os.path.exists(img_path) and os.path.getsize(img_path) > 1000:
+                image_refs.append(
+                    f"![Image: {img_filename}](./images/{img_filename})"
+                )
+                self.logger.debug(
+                    f"Saved cover snapshot page {page_num + 1}: "
+                    f"{img_filename} ({os.path.getsize(img_path):,} bytes)"
+                )
+            else:
+                self.logger.warning(
+                    f"Cover snapshot for page {page_num + 1} is suspiciously "
+                    f"small or missing ({img_path}). Falling back."
+                )
+                raise ValueError("Cover snapshot too small")
+
         except Exception as e:
-            self.logger.warning(f"Failed to save cover page snapshot: {e}")
+
+            self.logger.warning(
+                f"Primary cover render failed for page {page_num + 1} ({e}). "
+                f"Trying fallback render."
+            )
+            try:
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                # Try pix.save as a last resort (Pillow-free path)
+                prefix = self.conv_settings.get('image_prefix', 'img')
+                img_filename = f"{prefix}_{page_num + 1}_cover.jpg"
+                img_path = os.path.join(images_dir, img_filename)
+
+                # Convert through PIL as well (handles CMYK, etc.)
+                image = self._pixmap_to_pil(pix)
+                self._save_image_jpeg(image, img_path)
+
+                if os.path.exists(img_path) and os.path.getsize(img_path) > 500:
+                    image_refs.append(
+                        f"![Image: {img_filename}](./images/{img_filename})"
+                    )
+                    self.logger.info(
+                        f"Saved cover snapshot (fallback) page {page_num + 1}: "
+                        f"{img_filename}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"Fallback cover snapshot for page {page_num + 1} "
+                        f"also failed."
+                    )
+            except Exception as e2:
+                self.logger.error(
+                    f"All attempts to save cover page {page_num + 1} failed: {e2}"
+                )
+
         return image_refs
 
     # ------------------------------------------------------------------ #
@@ -600,7 +784,6 @@ class PDFProcessor:
         page_rect = page.rect
         page_area = page_rect.width * page_rect.height
         is_likely_scanned = len(text.strip()) < 100
-
         for i, img in enumerate(img_list):
             try:
                 xref = img[0]
@@ -610,7 +793,6 @@ class PDFProcessor:
                 rect = rects[0]
                 img_area = rect.width * rect.height
                 coverage_ratio = img_area / page_area if page_area > 0 else 0
-
                 # Skip background / full-page scan images
                 should_skip = False
                 skip_reason = ""
@@ -629,17 +811,14 @@ class PDFProcessor:
                 elif is_likely_scanned and coverage_ratio > 0.4:
                     should_skip = True
                     skip_reason = f"large image ({coverage_ratio:.1%}) on text-sparse page"
-
                 if should_skip:
                     self.logger.debug(
                         f"Skipping image {i} on page {page_num+1}: "
                         f"{skip_reason} (likely background scan)"
                     )
                     continue
-
                 if self.is_image_likely_irrelevant(rect, None):
                     continue
-
                 area = rect.width * rect.height
                 if area < 2500:
                     scale = 2.0
@@ -647,15 +826,12 @@ class PDFProcessor:
                     scale = 1.5
                 else:
                     scale = 1.0
-
                 mat = fitz.Matrix(scale, scale)
                 pix = page.get_pixmap(matrix=mat, clip=rect, alpha=False)
                 if page.rotation != 0:
                     pix = pix.rotate(page.rotation)
-
                 if self.is_image_likely_irrelevant(rect, pix):
                     continue
-
                 image = self._pixmap_to_pil(pix)
                 img_bytes_io = io.BytesIO()
                 image_for_check = self._resize_image(image)
@@ -666,14 +842,11 @@ class PDFProcessor:
                     quality=self.img_jpeg_quality, optimize=True
                 )
                 img_bytes = img_bytes_io.getvalue()
-
                 if self.is_image_relevant(img_bytes, text):
                     prefix = self.conv_settings.get('image_prefix', 'img')
                     img_filename = f"{prefix}_{page_num + 1}_{i}.jpg"
                     img_path = os.path.join(images_dir, img_filename)
-
                     self._save_image_jpeg(image, img_path)
-
                     image_refs.append(
                         f"![Image: {img_filename}](./images/{img_filename})"
                     )
@@ -810,7 +983,6 @@ class PDFProcessor:
         use_ocr_pbar = (ocr_page_count > 0 and is_scanned) or self.force_ocr
         total_images = self._count_total_images(doc) if self.save_images and self.filter_images else 0
         use_image_pbar = total_images > 0
-
         pbar_contexts = []
         if use_ocr_pbar:
             pbar_contexts.append(
@@ -917,6 +1089,17 @@ class PDFProcessor:
         with open(output_md_path, "w", encoding="utf-8") as f:
             f.write(combined)
         self.logger.info(f"Saved to: {output_md_path}")
+
+        # ---- Phase 5: log summary of saved images ----
+        cover_count = sum(
+            1 for pd in page_data_list
+            if pd["images"] and any("_cover." in ref for ref in pd["images"])
+        )
+        self.logger.info(
+            f"Done: {len(page_data_list)} pages, "
+            f"{len(batches)} batches, "
+            f"{cover_count} cover snapshot(s) saved."
+        )
 
     # ------------------------------------------------------------------ #
     #  LLM conversion
