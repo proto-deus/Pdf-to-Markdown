@@ -53,7 +53,7 @@ sudo apt-get install tesseract-ocr
 **Windows:**
 Download from [github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
 
-### 2. Install Python dependencies
+### 2. Clone Repository and Install Python dependencies
 
 ```bash
 #Clone or download the repository
