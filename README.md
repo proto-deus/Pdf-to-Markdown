@@ -58,22 +58,19 @@ Download from [github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mann
 ```bash
 #Clone or download the repository
 git clone https://github.com/proto-deus/Pdf-to-Markdown
-
-#(Recommended) Create venv:
-python -m venv pdf-to-markdown
-
-#Navigate to your venv
 cd pdf-to-markdown
 
-#Activate venv
+# Create a virtual environment (recommended)
+python -m venv .venv
+
+# Activate it
 # Linux / macOS:
 source .venv/bin/activate
 # Windows:
 .venv\Scripts\activate
 
-#Install requirements
+# Install dependencies
 pip install -r requirements.txt
-```
 
 #### `requirements.txt`
 ```txt
